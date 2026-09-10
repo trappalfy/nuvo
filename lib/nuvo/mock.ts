@@ -56,10 +56,18 @@ const round = (value: number, places: number) => {
   return Math.round(value * f) / f;
 };
 
+export type WeekOverride = "real" | "open" | "closed";
+
 type Store = {
   weekId: string;
   /** Week offset applied by the developer fast forward. */
   weeksAhead: number;
+  /**
+   * Demo control. The real schedule closes subscriptions from Thursday 4:00 PM
+   * ET to Monday's open, which would make the demo path unwalkable for half the
+   * week, so the mock forces the window open by default and can be flipped back.
+   */
+  weekOverride: WeekOverride;
   positions: Position[];
   allowances: Record<string, number>;
   balances: Record<string, number>;
@@ -68,6 +76,7 @@ type Store = {
 const freshStore = (): Store => ({
   weekId: currentWeek().id,
   weeksAhead: 0,
+  weekOverride: "open",
   positions: [],
   allowances: {},
   balances: {
@@ -121,7 +130,9 @@ export class MockClient implements NuvoClient {
   /** Screens subscribe to this so a fast forward or a claim repaints them. */
   onChange(listener: () => void) {
     this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
   private commit() {
@@ -132,7 +143,19 @@ export class MockClient implements NuvoClient {
   private week(): Week {
     let week = currentWeek();
     for (let i = 0; i < this.store.weeksAhead; i++) week = nextWeek(week);
-    return week;
+    const override = this.store.weekOverride;
+    if (override === "real") return week;
+    return { ...week, isOpen: override === "open" };
+  }
+
+  /** Demo control: force the subscription window open or closed. */
+  setWeekOverride(override: WeekOverride) {
+    this.store.weekOverride = override;
+    this.commit();
+  }
+
+  get weekOverride(): WeekOverride {
+    return this.store.weekOverride;
   }
 
   async getWeek() {
@@ -279,9 +302,10 @@ export class MockClient implements NuvoClient {
       if (position.status !== "active" || position.weekId !== week.id) continue;
 
       const reference = REFERENCE[position.ticker] ?? 100;
-      // Deterministic settlement inside +/-6% of the reference, so both outcomes
-      // show up in the list.
-      const drift = (hash(`settle:${position.weekId}:${position.ticker}`) - 0.5) * 0.12;
+      // Deterministic settlement inside +/-9% of the reference. The spread is
+      // wider than the ladder on purpose: which rung you picked is what decides
+      // the outcome, so a review sees both.
+      const drift = (hash(`settle:${position.weekId}:${position.ticker}`) * 2 - 1) * 0.09;
       const settlePrice = round(reference * (1 + drift), 2);
 
       const converted =
