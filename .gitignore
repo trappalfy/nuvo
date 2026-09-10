@@ -1,0 +1,11 @@
+node_modules/
+.next/
+out/
+.env*.local
+*.tsbuildinfo
+next-env.d.ts
+
+# Review screenshots and the raw generated clip: local only, both are heavy.
+shots/
+reference/
+background-nuvo.mp4
