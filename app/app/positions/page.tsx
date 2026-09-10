@@ -1,0 +1,168 @@
+"use client";
+
+import Link from "next/link";
+import { useState } from "react";
+import { useWallet } from "@/components/app/AppProviders";
+import { useToast } from "@/components/app/Toaster";
+import { amountOf, pct, usd } from "@/lib/format";
+import { explorerTx } from "@/lib/nuvo/config";
+import { etLabel } from "@/lib/nuvo/schedule";
+import { client, useNuvo } from "@/lib/nuvo/useNuvo";
+import type { Position } from "@/lib/nuvo/types";
+
+const TABS = [
+  { id: "active", label: "Active" },
+  { id: "settled", label: "Settled" },
+  { id: "history", label: "History" },
+] as const;
+
+type Tab = (typeof TABS)[number]["id"];
+
+// Brief 8: Active before settlement, Settled with Claim, then History.
+export default function PositionsPage() {
+  const [tab, setTab] = useState<Tab>("active");
+  const [claiming, setClaiming] = useState<string | null>(null);
+  const wallet = useWallet();
+  const toast = useToast();
+  const { data: positions, loading } = useNuvo((c) => c.getPositions(wallet.address as `0x${string}`), [
+    wallet.address,
+  ]);
+
+  const shown = (positions ?? []).filter((p) =>
+    tab === "active" ? p.status === "active" : tab === "settled" ? p.status === "claimable" : p.status === "claimed",
+  );
+
+  const claim = async (position: Position) => {
+    setClaiming(position.id);
+    try {
+      const tx = await client.claim(position.id);
+      toast({
+        title: `Claimed ${amountOf(position.settlement!.payout.token, position.settlement!.payout.amount)}`,
+        tone: "success",
+        href: explorerTx(tx.hash),
+        linkLabel: "Explorer",
+      });
+    } catch (e) {
+      toast({
+        title: e instanceof Error ? e.message : "Transaction failed. Try again.",
+        tone: "error",
+      });
+    } finally {
+      setClaiming(null);
+    }
+  };
+
+  return (
+    <div>
+      <h1 className="text-[40px] leading-none tracking-[-0.03em] text-ink">Positions</h1>
+
+      <div className="mt-[24px] inline-flex rounded-[10px] bg-nav p-[4px]" role="tablist">
+        {TABS.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === item.id}
+            onClick={() => setTab(item.id)}
+            className={[
+              "inline-flex h-[40px] items-center rounded-[6px] px-[18px] t-mono transition-colors duration-200",
+              tab === item.id ? "bg-white text-ink" : "text-dim hover:text-ink",
+            ].join(" ")}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      {!wallet.isConnected && (
+        <p className="mt-[28px] text-[16px] text-dim">Connect your wallet to see your positions.</p>
+      )}
+
+      {wallet.isConnected && loading && (
+        <p className="mt-[28px] text-[16px] text-dim">Loading positions…</p>
+      )}
+
+      {wallet.isConnected && !loading && shown.length === 0 && (
+        <div className="mt-[28px] rounded-[16px] bg-white p-[32px]">
+          <p className="text-[18px] text-ink">No positions yet. Pick a product.</p>
+          <Link
+            href="/app"
+            className="t-mono mt-[20px] inline-flex h-[44px] items-center rounded-[8px] bg-ink px-[18px] text-white hover:bg-ink-hover"
+          >
+            Products
+          </Link>
+        </div>
+      )}
+
+      <div className="mt-[28px] flex flex-col gap-[12px]">
+        {shown.map((position) => (
+          <article key={position.id} className="rounded-[16px] bg-white p-[24px]">
+            <div className="flex flex-wrap items-start justify-between gap-[16px]">
+              <div className="flex items-center gap-[12px]">
+                <span
+                  className={`block size-[10px] rounded-[2px] ${position.direction === "buyLow" ? "bg-lime" : "bg-sand"}`}
+                  aria-hidden="true"
+                />
+                <div>
+                  <h2 className="text-[22px] leading-none tracking-[-0.02em] text-ink">
+                    {position.ticker}
+                  </h2>
+                  <p className="mt-[8px] t-mono-sm text-dim">
+                    {position.direction === "buyLow" ? "Buy Low" : "Sell High"} · target $
+                    {usd(position.targetPrice)} · {pct(position.premiumBps)} for the week
+                  </p>
+                </div>
+              </div>
+
+              {position.status === "claimable" && position.settlement && (
+                <button
+                  type="button"
+                  onClick={() => claim(position)}
+                  disabled={claiming === position.id}
+                  className="inline-flex h-[44px] items-center rounded-[8px] bg-ink px-[18px] t-mono text-white transition-colors duration-200 hover:bg-ink-hover disabled:cursor-not-allowed disabled:bg-nav disabled:text-dim"
+                >
+                  {claiming === position.id ? "Confirming…" : "Claim"}
+                </button>
+              )}
+            </div>
+
+            <dl className="mt-[20px] grid gap-[16px] border-t border-[#E4E6E2] pt-[20px] sm:grid-cols-3">
+              <Cell label="Deposited" value={amountOf(position.depositToken, position.amount)} />
+              {position.settlement ? (
+                <>
+                  <Cell
+                    label="Settled at"
+                    value={`$${usd(position.settlement.settlePrice)}`}
+                    hint={position.settlement.converted ? "Converted" : "Not converted"}
+                  />
+                  <Cell
+                    label={position.status === "claimed" ? "Claimed" : "To claim"}
+                    value={amountOf(
+                      position.settlement.payout.token,
+                      position.settlement.payout.amount,
+                    )}
+                  />
+                </>
+              ) : (
+                <>
+                  <Cell label="Expires" value={`${etLabel(position.expiresAt)} ET`} />
+                  <Cell label="Status" value="Locked until settlement" />
+                </>
+              )}
+            </dl>
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Cell({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div>
+      <dt className="t-mono-sm text-dim">{label}</dt>
+      <dd className="mt-[8px] text-[18px] leading-none tabular text-ink">{value}</dd>
+      {hint && <p className="mt-[8px] t-mono-sm text-dim">{hint}</p>}
+    </div>
+  );
+}
