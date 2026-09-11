@@ -1,6 +1,7 @@
 "use client";
 
 import { ago, usd } from "@/lib/format";
+import { isMarketOpen } from "@/lib/nuvo/schedule";
 import type { Direction, Reference } from "@/lib/nuvo/types";
 
 // Where your price sits against the Chainlink reference. Only the two real
@@ -48,7 +49,12 @@ export function ReferenceScale({
         </span>
         {reference.source === "chain" && (
           <span className={reference.stale ? "text-[#8A3B2F]" : undefined}>
-            {reference.stale ? "Reference is stale · " : ""}Updated {ago(reference.updatedAt, now)}
+            {reference.stale
+              ? "Reference is stale · "
+              : isMarketOpen(now)
+                ? ""
+                : "Market closed · "}
+            Updated {ago(reference.updatedAt, now)}
           </span>
         )}
       </div>

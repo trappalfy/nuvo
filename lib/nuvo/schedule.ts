@@ -1,26 +1,29 @@
 import { SCHEDULE } from "./config";
 import type { Week } from "./types";
 
-// Brief 1: the week is fixed in Eastern Time — subscriptions from Monday's open
-// to Thursday 4:00 PM ET, expiry Friday 4:00 PM ET. Everything below works in ET
-// wall clock and converts to instants, so DST changes do not shift the deadlines.
+// Subscriptions are open around the clock. The week on offer is the one whose
+// Thursday 4:00 PM ET cutoff is still ahead, and it expires that Friday at
+// 4:00 PM ET. Everything below works in ET wall clock and converts to instants,
+// so DST changes do not shift the deadlines.
 
 const TZ = SCHEDULE.timeZone;
 
+const PARTS = new Intl.DateTimeFormat("en-US", {
+  timeZone: TZ,
+  hour12: false,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  weekday: "short",
+});
+
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
 const partsOf = (ts: number) => {
-  const dtf = new Intl.DateTimeFormat("en-US", {
-    timeZone: TZ,
-    hour12: false,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    weekday: "short",
-  });
-  const parts = Object.fromEntries(dtf.formatToParts(ts).map((p) => [p.type, p.value]));
-  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const parts = Object.fromEntries(PARTS.formatToParts(ts).map((p) => [p.type, p.value]));
   return {
     year: Number(parts.year),
     month: Number(parts.month),
@@ -28,7 +31,7 @@ const partsOf = (ts: number) => {
     hour: Number(parts.hour) % 24,
     minute: Number(parts.minute),
     second: Number(parts.second),
-    weekday: weekdays.indexOf(String(parts.weekday)),
+    weekday: WEEKDAYS.indexOf(String(parts.weekday)),
   };
 };
 
@@ -70,20 +73,13 @@ const labelOf = (
     : `Week of ${MONTHS[monday.month - 1]} ${monday.day}–${MONTHS[friday.month - 1]} ${friday.day}`;
 
 const weekFromMonday = (monday: { year: number; month: number; day: number }, now: number): Week => {
-  const thursday = addDays(monday, 3);
-  const friday = addDays(monday, 4);
+  const cutoffDay = addDays(monday, SCHEDULE.closesAt.weekday - 1);
+  const friday = addDays(monday, SCHEDULE.expiresAt.weekday - 1);
 
-  const opensAt = fromEt(
-    monday.year,
-    monday.month,
-    monday.day,
-    SCHEDULE.opensAt.hour,
-    SCHEDULE.opensAt.minute,
-  );
   const closesAt = fromEt(
-    thursday.year,
-    thursday.month,
-    thursday.day,
+    cutoffDay.year,
+    cutoffDay.month,
+    cutoffDay.day,
     SCHEDULE.closesAt.hour,
     SCHEDULE.closesAt.minute,
   );
@@ -98,34 +94,34 @@ const weekFromMonday = (monday: { year: number; month: number; day: number }, no
   return {
     id: isoOf(monday),
     label: labelOf(monday, friday),
-    opensAt,
     closesAt,
     expiresAt,
-    isOpen: now >= opensAt && now < closesAt,
+    isOpen: now < closesAt,
   };
 };
 
-/** The week that is on offer right now. Past Friday's expiry, the next one. */
+/** The week on offer: the first whose Thursday cutoff is still ahead. */
 export function currentWeek(now: number = Date.now()): Week {
   const p = partsOf(now);
-  // Sunday counts as the week that is about to open.
   const daysSinceMonday = (p.weekday + 6) % 7;
-  let monday = addDays(p, -daysSinceMonday);
-  let week = weekFromMonday(monday, now);
-  if (now >= week.expiresAt) {
-    monday = addDays(monday, 7);
-    week = weekFromMonday(monday, now);
-  }
-  return week;
+  const monday = addDays(p, -daysSinceMonday);
+  const week = weekFromMonday(monday, now);
+  return now < week.closesAt ? week : weekFromMonday(addDays(monday, 7), now);
 }
 
-export const nextWeek = (from: Week) =>
-  weekFromMonday(addDays(fromIso(from.id), 7), from.expiresAt + 1);
-
-const fromIso = (iso: string) => {
-  const [year, month, day] = iso.split("-").map(Number);
-  return { year, month, day };
-};
+/**
+ * US market hours in ET, Monday to Friday. Outside them the reference does not
+ * move, which is not the same as a stale feed. Exchange holidays are not known here.
+ */
+export function isMarketOpen(now: number = Date.now()) {
+  const p = partsOf(now);
+  if (p.weekday < 1 || p.weekday > 5) return false;
+  const minutes = p.hour * 60 + p.minute;
+  const { opensAt, closesAt } = SCHEDULE.market;
+  return (
+    minutes >= opensAt.hour * 60 + opensAt.minute && minutes < closesAt.hour * 60 + closesAt.minute
+  );
+}
 
 /** "Thu 4:00 PM ET" style label for a deadline. */
 export function etLabel(ts: number) {
@@ -139,6 +135,19 @@ export function etLabel(ts: number) {
     .format(ts)
     .replace(",", "");
 }
+
+const EXPIRY = new Intl.DateTimeFormat("en-US", {
+  timeZone: TZ,
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  hour12: true,
+});
+
+/** "Fri, Sep 18, 4:00 PM" — the full date, since an expiry can be up to eight days out. */
+export const expiryLabel = (ts: number) => EXPIRY.format(ts);
 
 /** "2d 04:11:32", or "00:04:11" inside the last hour. */
 export function countdown(ms: number) {

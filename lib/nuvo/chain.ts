@@ -23,7 +23,7 @@ import {
   hasQuotes,
   tokenOf,
 } from "./config";
-import { currentWeek } from "./schedule";
+import { currentWeek, isMarketOpen } from "./schedule";
 import type {
   Address,
   Balance,
@@ -204,7 +204,8 @@ export class ChainClient implements NuvoClient {
     return {
       price: Number(formatUnits(answer, Number(decimals))),
       updatedAt: updated,
-      stale: Date.now() - updated > SCHEDULE.staleReferenceHours * 3600_000,
+      // Outside market hours the feed rests at the last close; that is not stale.
+      stale: isMarketOpen() && Date.now() - updated > SCHEDULE.staleReferenceHours * 3600_000,
       source: "chain",
     };
   }

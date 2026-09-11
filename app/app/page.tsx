@@ -4,14 +4,19 @@ import { useMemo, useState } from "react";
 import { DirectionToggle } from "@/components/app/DirectionToggle";
 import { TargetChip } from "@/components/app/TargetChip";
 import { usd } from "@/lib/format";
-import { useNuvo } from "@/lib/nuvo/useNuvo";
+import { useNow, useNuvo, useWeek } from "@/lib/nuvo/useNuvo";
 import type { Direction, Product } from "@/lib/nuvo/types";
 
 // Brief 8: the ticker table with the ladder as chips. Cards under 1024.
 export default function ProductsPage() {
   const [direction, setDirection] = useState<Direction>("buyLow");
   const [query, setQuery] = useState("");
-  const { data: products, loading } = useNuvo((c) => c.listProducts(direction), [direction]);
+  // Checked every 30s, so a page left open picks up the next week at Thursday's cutoff.
+  const week = useWeek(useNow(30_000));
+  const { data: products, loading } = useNuvo(
+    (c) => c.listProducts(direction),
+    [direction, week.id],
+  );
   const { data: tickers } = useNuvo((c) => c.listTickers(), []);
 
   const names = useMemo(
@@ -83,7 +88,7 @@ export default function ProductsPage() {
               <>
                 <p className="text-[18px] text-ink">No products are open right now.</p>
                 <p className="mt-[8px] max-w-[520px] text-[15px] leading-[1.5] text-dim">
-                  The ladder for each week is published when subscriptions open on Monday.
+                  The ladder appears here as soon as prices for the week are published.
                 </p>
               </>
             )}

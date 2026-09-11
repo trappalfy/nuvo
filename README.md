@@ -36,6 +36,18 @@ The interface the UI calls is in `lib/nuvo/abi.ts`: `subscribe`, `claim`,
 derived as `keccak256(abi.encodePacked(weekId, ticker, direction, targetBps))` —
 the contract has to derive them the same way. Prices are 8-decimal fixed point.
 
+### Schedule
+
+Subscriptions are open around the clock (`lib/nuvo/schedule.ts`). The week on
+offer is the one whose Thursday 4:00 PM ET cutoff is still ahead; it expires that
+Friday at 4:00 PM ET. From the cutoff on, the app offers the next week, so
+between Thursday 4:00 PM and the following Thursday it quotes and subscribes to
+next Friday's expiry — including over the weekend. The contract has to accept
+`subscribe` for a week until its cutoff and from the previous week's cutoff, and
+the quote service has to price it, weekends included.
+
+The cutoff stays: a day before expiry the outcome is close to known.
+
 ### Quote service
 
 ```

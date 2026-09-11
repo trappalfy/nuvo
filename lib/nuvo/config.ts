@@ -54,12 +54,17 @@ export const QUOTE_API = clean(process.env.NEXT_PUBLIC_QUOTE_API).replace(/\/$/,
 /** Brief 1: the ladder, as a distance from the reference in percent. */
 export const LADDER = [2, 4, 6, 8] as const;
 
-/** Brief 1: subscriptions run Monday open to Thursday 4:00 PM ET, expiry Friday 4:00 PM ET. */
+/**
+ * Subscriptions are open around the clock. Thursday 4:00 PM ET is the cutoff for
+ * that Friday's 4:00 PM ET expiry; from then on, new subscriptions go to the next
+ * Friday. The cutoff keeps anyone from entering once the outcome is nearly known.
+ */
 export const SCHEDULE = {
   timeZone: "America/New_York",
-  opensAt: { weekday: 1, hour: 9, minute: 30 },
   closesAt: { weekday: 4, hour: 16, minute: 0 },
   expiresAt: { weekday: 5, hour: 16, minute: 0 },
+  /** US market hours, to tell a closed market from a feed that stopped updating. */
+  market: { opensAt: { hour: 9, minute: 30 }, closesAt: { hour: 16, minute: 0 } },
   /** Brief 1: if the reference has not updated for this long, settlement waits for a fresh price. */
   staleReferenceHours: 6,
 };

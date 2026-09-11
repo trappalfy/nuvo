@@ -10,7 +10,8 @@ import { useToast } from "@/components/app/Toaster";
 import { amountOf, apr, pct, qty, signedPct, usd } from "@/lib/format";
 import { LIMITS, USDG, explorerTx } from "@/lib/nuvo/config";
 import { quoteErrorMessage, txErrorMessage } from "@/lib/nuvo/errors";
-import { client, useNow, useNuvo } from "@/lib/nuvo/useNuvo";
+import { expiryLabel } from "@/lib/nuvo/schedule";
+import { client, useNow, useNuvo, useWeek } from "@/lib/nuvo/useNuvo";
 import type { Address, Direction, Quote } from "@/lib/nuvo/types";
 
 export default function TickerPage({ params }: { params: Promise<{ ticker: string }> }) {
@@ -42,10 +43,11 @@ function Subscribe({ symbol }: { symbol: string }) {
   const busy = useRef(false);
 
   const owner = wallet.address as Address | undefined;
-  const { data: week } = useNuvo((c) => c.getWeek(), []);
+  const week = useWeek(now);
   const { data: products, loading } = useNuvo(
     (c) => c.listProducts(direction, symbol),
-    [direction, symbol],
+    // Read again when the week rolls over at Thursday's cutoff.
+    [direction, symbol, week.id],
   );
   const { data: tickers } = useNuvo((c) => c.listTickers(), []);
   const { data: balances } = useNuvo((c) => c.getBalances(owner), [owner]);
@@ -68,7 +70,6 @@ function Subscribe({ symbol }: { symbol: string }) {
     [depositToken, owner, pending],
   );
 
-  const open = week ? now >= week.opensAt && now < week.closesAt : true;
   const minimum =
     direction === "buyLow"
       ? LIMITS.minUsdg
@@ -202,7 +203,6 @@ function Subscribe({ symbol }: { symbol: string }) {
   // allowance and quote steps need the contract and the quote service, so they
   // only come into play once those are configured.
   const action = (() => {
-    if (!open) return { label: "Subscriptions are closed. Next week opens Monday.", disabled: true };
     if (!wallet.isConnected) return { label: "Connect wallet", onClick: wallet.connect };
     if (!wallet.isRightNetwork) return { label: "Switch network", onClick: wallet.switchNetwork };
     if (pending) return { label: "Confirming…", disabled: true };
@@ -311,8 +311,8 @@ function Subscribe({ symbol }: { symbol: string }) {
               <li>Settlement uses the Chainlink reference at Friday’s close, not the pool price.</li>
               <li>Your deposit is locked until settlement. There is no early exit.</li>
               <li>
-                Subscriptions run from Monday’s open to Thursday 4:00 PM ET. Expiry is Friday 4:00
-                PM ET.
+                Subscriptions are open around the clock. Until Thursday 4:00 PM ET they go into
+                this Friday’s expiry at 4:00 PM ET; after that, into the next Friday’s.
               </li>
             </ul>
           </section>
@@ -415,7 +415,7 @@ function Subscribe({ symbol }: { symbol: string }) {
             />
             <Row
               label="Settles"
-              value={week ? `${week.label.replace("Week of ", "")}, Friday 4:00 PM ET` : "—"}
+              value={`${expiryLabel(product.expiresAt)} ET`}
             />
           </dl>
 

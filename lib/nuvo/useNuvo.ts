@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ChainClient } from "./chain";
 import { getClient } from "./client";
+import { currentWeek } from "./schedule";
 
 // One place where screens read from the client. A write that lands, or a wallet
 // that changes, pushes through onChange so every mounted screen re-reads.
@@ -53,4 +54,14 @@ export function useNow(intervalMs = 1000) {
     return () => clearInterval(id);
   }, [intervalMs]);
   return now;
+}
+
+/**
+ * The week on offer at `now`. It keeps its identity until Thursday's cutoff and
+ * then rolls to the next week, so a page left open follows along.
+ */
+export function useWeek(now: number) {
+  const id = currentWeek(now).id;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  return useMemo(() => currentWeek(now), [id]);
 }

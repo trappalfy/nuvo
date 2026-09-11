@@ -37,9 +37,11 @@ export type Week = {
   id: string;
   /** "Week of Sep 14–18" */
   label: string;
-  opensAt: number;
+  /** Thursday 4:00 PM ET: the last moment to subscribe to this week's expiry. */
   closesAt: number;
+  /** Friday 4:00 PM ET. */
   expiresAt: number;
+  /** Subscriptions to this week are still taken. Always true for the week on offer. */
   isOpen: boolean;
 };
 
