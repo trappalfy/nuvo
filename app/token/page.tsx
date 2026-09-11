@@ -2,7 +2,7 @@ import { Header } from "@/components/landing/Header";
 import { ContractAddress } from "@/components/token/ContractAddress";
 import { Chip } from "@/components/ui/Chip";
 
-export const metadata = { title: "Token — Nuvo" };
+export const metadata = { title: "Token | Nuvo" };
 
 // The official address of the Nuvo token. Filled from env at launch.
 export default function TokenPage() {

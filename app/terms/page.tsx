@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { Lockup } from "@/components/ui/Mark";
 
-export const metadata = { title: "Terms — Nuvo" };
+export const metadata = { title: "Terms | Nuvo" };
 
 // Brief 8 / 12: a placeholder page. The legal copy is still an open question.
 export default function TermsPage() {

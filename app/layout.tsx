@@ -19,7 +19,7 @@ const geistMono = Geist_Mono({
   display: "swap",
 });
 
-const TITLE = "Nuvo — Name your price. Get paid to wait.";
+const TITLE = "Nuvo | Name your price. Get paid to wait.";
 const DESCRIPTION =
   "Dual investment on tokenized stocks. Buy below the market or sell above it, with a premium either way.";
 

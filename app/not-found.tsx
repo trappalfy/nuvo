@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { Lockup } from "@/components/ui/Mark";
 
-export const metadata = { title: "Not found — Nuvo" };
+export const metadata = { title: "Not found | Nuvo" };
 
 export default function NotFound() {
   return (

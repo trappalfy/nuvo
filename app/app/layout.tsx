@@ -6,7 +6,7 @@ import { Toaster } from "@/components/app/Toaster";
 import { WeekStrip } from "@/components/app/WeekStrip";
 
 export const metadata: Metadata = {
-  title: "Nuvo — App",
+  title: "Nuvo | App",
   description: "Dual investment on tokenized stocks, settled every Friday.",
 };
 
