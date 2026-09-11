@@ -41,6 +41,15 @@ export type Reference = {
   updatedAt: number;
   /** True when the feed has not updated inside the window from the config. */
   stale: boolean;
+  /** "chain" is a Chainlink read; "catalog" is the line-up used before the chain is configured. */
+  source: "chain" | "catalog";
+};
+
+/** A ticker on offer, with what the UI needs to label it. */
+export type TickerInfo = {
+  symbol: string;
+  name: string;
+  uiMultiplier: number;
 };
 
 export type Product = {

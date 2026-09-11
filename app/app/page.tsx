@@ -4,7 +4,6 @@ import { useMemo, useState } from "react";
 import { DirectionToggle } from "@/components/app/DirectionToggle";
 import { TargetChip } from "@/components/app/TargetChip";
 import { usd } from "@/lib/format";
-import { TOKENS } from "@/lib/nuvo/config";
 import { useNuvo } from "@/lib/nuvo/useNuvo";
 import type { Direction, Product } from "@/lib/nuvo/types";
 
@@ -13,14 +12,11 @@ export default function ProductsPage() {
   const [direction, setDirection] = useState<Direction>("buyLow");
   const [query, setQuery] = useState("");
   const { data: products, loading } = useNuvo((c) => c.listProducts(direction), [direction]);
-  const { data: tokens } = useNuvo(
-    (c) => Promise.all(TOKENS.map((t) => c.getToken(t.symbol).catch(() => null))),
-    [],
-  );
+  const { data: tickers } = useNuvo((c) => c.listTickers(), []);
 
   const names = useMemo(
-    () => new Map((tokens ?? []).flatMap((t) => (t ? [[t.symbol, t.name] as const] : []))),
-    [tokens],
+    () => new Map((tickers ?? []).map((t) => [t.symbol, t.name] as const)),
+    [tickers],
   );
 
   const rows = useMemo(() => {
@@ -31,7 +27,8 @@ export default function ProductsPage() {
       bySymbol.set(product.ticker, list);
     }
     const term = query.trim().toUpperCase();
-    return TOKENS.map((t) => ({ ticker: t.symbol, products: bySymbol.get(t.symbol) ?? [] }))
+    return (tickers ?? [])
+      .map((t) => ({ ticker: t.symbol, products: bySymbol.get(t.symbol) ?? [] }))
       .filter((row) => row.products.length > 0)
       .filter(
         (row) =>
@@ -39,7 +36,7 @@ export default function ProductsPage() {
           row.ticker.includes(term) ||
           (names.get(row.ticker) ?? "").toUpperCase().includes(term),
       );
-  }, [names, products, query]);
+  }, [names, products, query, tickers]);
 
   return (
     <div>
@@ -74,7 +71,9 @@ export default function ProductsPage() {
           <span>Targets for this week</span>
         </div>
 
-        {loading && <div className="px-[24px] py-[32px] text-[16px] text-dim">Loading products…</div>}
+        {loading && !products && (
+          <div className="px-[24px] py-[32px] text-[16px] text-dim">Loading products…</div>
+        )}
 
         {!loading && rows.length === 0 && (
           <div className="px-[24px] py-[40px]">
@@ -98,7 +97,7 @@ export default function ProductsPage() {
           >
             <div>
               <div className="text-[20px] leading-none tracking-[-0.02em] text-ink">{row.ticker}</div>
-              {names.get(row.ticker) && (
+              {names.get(row.ticker) && names.get(row.ticker) !== row.ticker && (
                 <div className="mt-[6px] text-[14px] text-dim">{names.get(row.ticker)}</div>
               )}
             </div>

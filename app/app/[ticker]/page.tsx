@@ -45,16 +45,17 @@ function Subscribe({ symbol }: { symbol: string }) {
     (c) => c.listProducts(direction, symbol),
     [direction, symbol],
   );
-  const { data: token } = useNuvo((c) => c.getToken(symbol).catch(() => undefined), [symbol]);
+  const { data: tickers } = useNuvo((c) => c.listTickers(), []);
   const { data: balances } = useNuvo((c) => c.getBalances(owner), [owner]);
 
+  const info = tickers?.find((t) => t.symbol === symbol);
   const product = useMemo(
     () => products?.find((p) => Math.abs(p.targetOffset) === Math.abs(step)) ?? products?.[0],
     [products, step],
   );
 
   const depositToken = direction === "buyLow" ? USDG.symbol : symbol;
-  const stockMultiplier = token?.uiMultiplier ?? 1;
+  const stockMultiplier = info?.uiMultiplier ?? 1;
   const depositMultiplier = direction === "buyLow" ? 1 : stockMultiplier;
   const balance = balances?.[depositToken];
   const amountNumber = Number(amount) || 0;
@@ -150,7 +151,10 @@ function Subscribe({ symbol }: { symbol: string }) {
   const submitted = (title: string) => (hash: Address) =>
     toast({ title, tone: "info", href: explorerTx(hash), linkLabel: "Explorer" });
 
+  // Contract writes stay inert until the Nuvo contract is configured: the
+  // buttons look and behave like the live ones, a press simply does nothing.
   const onApprove = async () => {
+    if (!client.ready.contracts) return;
     setError(undefined);
     setPending("approve");
     try {
@@ -166,6 +170,7 @@ function Subscribe({ symbol }: { symbol: string }) {
   };
 
   const onSubscribe = async () => {
+    if (!client.ready.contracts) return;
     if (!product || !quote) return;
     setError(undefined);
     setPending("subscribe");
@@ -183,7 +188,9 @@ function Subscribe({ symbol }: { symbol: string }) {
     }
   };
 
-  // Brief 8: every state of the subscribe button, in order of precedence.
+  // Brief 8: every state of the subscribe button, in order of precedence. The
+  // allowance and quote steps need the contract and the quote service, so they
+  // only come into play once those are configured.
   const action = (() => {
     if (!open) return { label: "Subscriptions are closed. Next week opens Monday.", disabled: true };
     if (!wallet.isConnected) return { label: "Connect wallet", onClick: wallet.connect };
@@ -196,11 +203,12 @@ function Subscribe({ symbol }: { symbol: string }) {
       return { label: `Minimum ${amountOf(depositToken, minimum, depositMultiplier)}`, disabled: true };
     if (maximum > 0 && amountNumber > maximum)
       return { label: `Maximum ${amountOf(depositToken, maximum, depositMultiplier)}`, disabled: true };
-    if (!client.ready.contracts) return { label: "Subscriptions are not available yet", disabled: true };
-    if ((allowance ?? 0) < amountNumber) return { label: `Approve ${depositToken}`, onClick: onApprove };
-    if (!client.ready.quotes) return { label: "Quotes are unavailable right now", disabled: true };
-    if (quoteLoading) return { label: "Fetching quote…", disabled: true };
-    if (quoteError || !quote || staleQuote) return { label: "Refresh quote", onClick: refreshQuote };
+    if (client.ready.contracts) {
+      if ((allowance ?? 0) < amountNumber) return { label: `Approve ${depositToken}`, onClick: onApprove };
+      if (!client.ready.quotes) return { label: "Quotes are unavailable right now", disabled: true };
+      if (quoteLoading) return { label: "Fetching quote…", disabled: true };
+      if (quoteError || !quote || staleQuote) return { label: "Refresh quote", onClick: refreshQuote };
+    }
     return { label: "Subscribe", onClick: onSubscribe };
   })();
 
@@ -233,12 +241,14 @@ function Subscribe({ symbol }: { symbol: string }) {
             <div className="flex flex-wrap items-end justify-between gap-[16px]">
               <div>
                 <h1 className="text-[32px] leading-none tracking-[-0.03em] text-ink">{symbol}</h1>
-                {token?.name && token.name !== symbol && (
-                  <p className="mt-[8px] text-[15px] text-dim">{token.name}</p>
+                {info?.name && info.name !== symbol && (
+                  <p className="mt-[8px] text-[15px] text-dim">{info.name}</p>
                 )}
               </div>
               <div className="text-right">
-                <div className="t-mono-sm text-dim">Chainlink reference</div>
+                <div className="t-mono-sm text-dim">
+                  {product.reference.source === "chain" ? "Chainlink reference" : "Reference price"}
+                </div>
                 <div className="mt-[8px] text-[28px] leading-none tabular text-ink">
                   ${usd(product.reference.price)}
                 </div>

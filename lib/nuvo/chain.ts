@@ -8,6 +8,7 @@ import {
 } from "viem";
 import { nuvoChain } from "../wallet/chain";
 import { aggregatorV3Abi, erc20Abi, nuvoDualAbi, productId as deriveProductId } from "./abi";
+import { CATALOG, catalogProducts } from "./catalog";
 import {
   LADDER,
   NETWORK,
@@ -31,6 +32,7 @@ import type {
   Product,
   Quote,
   Reference,
+  TickerInfo,
   TokenInfo,
   TxResult,
   Week,
@@ -157,6 +159,7 @@ export class ChainClient implements NuvoClient {
       price: Number(formatUnits(answer, Number(decimals))),
       updatedAt: updated,
       stale: Date.now() - updated > SCHEDULE.staleReferenceHours * 3600_000,
+      source: "chain",
     };
   }
 
@@ -182,8 +185,26 @@ export class ChainClient implements NuvoClient {
     }
   }
 
+  /** The tickers on offer, in display order. */
+  async listTickers(): Promise<TickerInfo[]> {
+    if (!hasProducts()) {
+      return CATALOG.map(({ symbol, name }) => ({ symbol, name, uiMultiplier: 1 }));
+    }
+    return Promise.all(
+      TOKENS.map(async (token) => {
+        try {
+          const info = await this.getToken(token.symbol);
+          return { symbol: token.symbol, name: info.name, uiMultiplier: info.uiMultiplier };
+        } catch {
+          return { symbol: token.symbol, name: token.symbol, uiMultiplier: 1 };
+        }
+      }),
+    );
+  }
+
   async listProducts(direction: Direction, ticker?: string): Promise<Product[]> {
-    if (!hasProducts()) return [];
+    // Until the tokens and feeds are configured the line-up comes from the catalog.
+    if (!hasProducts()) return catalogProducts(direction, ticker);
 
     const week = currentWeek();
     const wanted = ticker

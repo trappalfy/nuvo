@@ -46,9 +46,11 @@ export function ReferenceScale({
           {distance > 0 ? "+" : ""}
           {distance.toFixed(2)}% from the reference
         </span>
-        <span className={reference.stale ? "text-[#8A3B2F]" : undefined}>
-          {reference.stale ? "Reference is stale · " : ""}Updated {ago(reference.updatedAt, now)}
-        </span>
+        {reference.source === "chain" && (
+          <span className={reference.stale ? "text-[#8A3B2F]" : undefined}>
+            {reference.stale ? "Reference is stale · " : ""}Updated {ago(reference.updatedAt, now)}
+          </span>
+        )}
       </div>
     </div>
   );

@@ -39,6 +39,8 @@ export default function PositionsPage() {
   );
 
   const claim = async (position: Position) => {
+    // Contract writes stay inert until the Nuvo contract is configured.
+    if (!client.ready.contracts) return;
     setClaiming(position.id);
     try {
       const tx = await client.claim(position.id, (hash) =>
