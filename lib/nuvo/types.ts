@@ -1,5 +1,9 @@
 // The shape the screens read. One implementation, ChainClient, backed by the
 // network and the contracts from env.
+//
+// Amounts on this side are in display units: what the user sees and types,
+// stocks already through the ERC-8056 multiplier. The client converts to the
+// token's base units at the contract.
 
 export type Direction = "buyLow" | "sellHigh";
 
@@ -21,7 +25,12 @@ export type TokenInfo = {
   decimals: number;
   /** ERC-8056: amounts are shown multiplied by this. */
   uiMultiplier: number;
+  /** The same multiplier as 18-decimal fixed point, for exact conversions. */
+  uiMultiplierWad: bigint;
 };
+
+/** A wallet balance in display units, with the exact decimal string for Max. */
+export type Balance = { amount: number; exact: string };
 
 export type Week = {
   /** ISO date of the Monday in ET. Also the id the product ids are derived from. */
@@ -72,6 +81,8 @@ export type Product = {
 export type Quote = {
   productId: Address;
   amount: number;
+  /** The amount as typed. A quote is only used for the amount it was signed for. */
+  input: string;
   premiumBps: number;
   premiumAmount: number;
   /** Payout if the reference reaches the target. */
@@ -115,11 +126,11 @@ export interface NuvoClient {
   getWeek(): Promise<Week>;
   getToken(symbol: string): Promise<TokenInfo>;
   listProducts(direction: Direction, ticker?: string): Promise<Product[]>;
-  getQuote(product: Product, amount: number): Promise<Quote>;
-  getBalances(address?: Address): Promise<Record<string, number>>;
+  getQuote(product: Product, amount: string): Promise<Quote>;
+  getBalances(address?: Address): Promise<Record<string, Balance>>;
   getAllowance(symbol: string, owner?: Address): Promise<number>;
-  approve(symbol: string, amount: number): Promise<TxResult>;
-  subscribe(product: Product, amount: number, quote: Quote): Promise<TxResult>;
+  approve(symbol: string, amount: string): Promise<TxResult>;
+  subscribe(product: Product, amount: string, quote: Quote): Promise<TxResult>;
   getPositions(address?: Address): Promise<Position[]>;
   claim(positionId: string): Promise<TxResult>;
   /** Screens repaint on this after a write lands. */

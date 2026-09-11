@@ -24,7 +24,7 @@ export function AppHeader() {
     (c) => c.getBalances(wallet.address as Address | undefined),
     [wallet.address],
   );
-  const usdg = balances?.[USDG.symbol];
+  const usdg = balances?.[USDG.symbol]?.amount;
 
   return (
     <header className="sticky top-0 z-40 border-b border-[#E4E6E2] bg-page/90 backdrop-blur-md">

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, use, useEffect, useMemo, useState } from "react";
+import { Suspense, use, useEffect, useMemo, useRef, useState } from "react";
 import { DirectionToggle } from "@/components/app/DirectionToggle";
 import { ReferenceScale } from "@/components/app/ReferenceScale";
 import { useWallet } from "@/components/app/AppProviders";
@@ -38,6 +38,8 @@ function Subscribe({ symbol }: { symbol: string }) {
   const [quoteError, setQuoteError] = useState<string | undefined>(undefined);
   const [pending, setPending] = useState<"approve" | "subscribe" | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
+  // Blocks a second press before the pending state has rendered.
+  const busy = useRef(false);
 
   const owner = wallet.address as Address | undefined;
   const { data: week } = useNuvo((c) => c.getWeek(), []);
@@ -54,10 +56,11 @@ function Subscribe({ symbol }: { symbol: string }) {
     [products, step],
   );
 
+  // Amounts here are display units, stocks already through the ERC-8056
+  // multiplier. The client converts to base units at the contract.
   const depositToken = direction === "buyLow" ? USDG.symbol : symbol;
-  const stockMultiplier = info?.uiMultiplier ?? 1;
-  const depositMultiplier = direction === "buyLow" ? 1 : stockMultiplier;
-  const balance = balances?.[depositToken];
+  const balance = balances?.[depositToken]?.amount;
+  const exactBalance = balances?.[depositToken]?.exact;
   const amountNumber = Number(amount) || 0;
 
   const { data: allowance } = useNuvo(
@@ -73,7 +76,12 @@ function Subscribe({ symbol }: { symbol: string }) {
         ? LIMITS.minStockValueUsdg / product.reference.price
         : 0;
   const maximum = direction === "buyLow" ? LIMITS.maxUsdg : 0;
-  const premiumBps = quote?.premiumBps ?? product?.premiumBps;
+
+  // A quote is signed for one product and one amount. Anything else is not used.
+  const quoteFits =
+    !!quote && !!product && quote.productId === product.id && quote.input === amount;
+  const staleQuote = !!quote && now > quote.expiresAt;
+  const premiumBps = (quoteFits ? quote?.premiumBps : undefined) ?? product?.premiumBps;
 
   // Brief 8: the outcome numbers move as the amount is typed. Until a premium
   // is known they are shown without it, marked "+ premium".
@@ -104,7 +112,7 @@ function Subscribe({ symbol }: { symbol: string }) {
     setQuoteError(undefined);
     const id = setTimeout(() => {
       client
-        .getQuote(product, amountNumber)
+        .getQuote(product, amount)
         .then((q) => {
           if (alive) setQuote(q);
         })
@@ -121,9 +129,7 @@ function Subscribe({ symbol }: { symbol: string }) {
       alive = false;
       clearTimeout(id);
     };
-  }, [amountNumber, product]);
-
-  const staleQuote = !!quote && now > quote.expiresAt;
+  }, [amount, amountNumber, product]);
 
   const setParams = (next: { direction?: Direction; target?: number }) => {
     const params = new URLSearchParams(search.toString());
@@ -139,7 +145,7 @@ function Subscribe({ symbol }: { symbol: string }) {
     setQuoteLoading(true);
     setQuoteError(undefined);
     client
-      .getQuote(product, amountNumber)
+      .getQuote(product, amount)
       .then(setQuote)
       .catch((e) => {
         setQuote(undefined);
@@ -154,28 +160,31 @@ function Subscribe({ symbol }: { symbol: string }) {
   // Contract writes stay inert until the Nuvo contract is configured: the
   // buttons look and behave like the live ones, a press simply does nothing.
   const onApprove = async () => {
-    if (!client.ready.contracts) return;
+    if (!client.ready.contracts || busy.current) return;
+    busy.current = true;
     setError(undefined);
     setPending("approve");
     try {
-      await client.approve(depositToken, amountNumber, submitted(`Approving ${depositToken}`));
+      await client.approve(depositToken, amount, submitted(`Approving ${depositToken}`));
       toast({ title: `${depositToken} approved`, tone: "success" });
     } catch (e) {
       const message = txErrorMessage(e);
       setError(message);
       toast({ title: message, tone: "error" });
     } finally {
+      busy.current = false;
       setPending(null);
     }
   };
 
   const onSubscribe = async () => {
-    if (!client.ready.contracts) return;
-    if (!product || !quote) return;
+    if (!client.ready.contracts || busy.current) return;
+    if (!product || !quote || !quoteFits) return;
+    busy.current = true;
     setError(undefined);
     setPending("subscribe");
     try {
-      const tx = await client.subscribe(product, amountNumber, quote, submitted("Subscription submitted"));
+      const tx = await client.subscribe(product, amount, quote, submitted("Subscription submitted"));
       toast({ title: "Subscribed", tone: "success", href: explorerTx(tx.hash), linkLabel: "Explorer" });
       setAmount("");
       setQuote(undefined);
@@ -184,6 +193,7 @@ function Subscribe({ symbol }: { symbol: string }) {
       setError(message);
       toast({ title: message, tone: "error" });
     } finally {
+      busy.current = false;
       setPending(null);
     }
   };
@@ -200,14 +210,14 @@ function Subscribe({ symbol }: { symbol: string }) {
     if (balance !== undefined && amountNumber > balance)
       return { label: `Not enough ${depositToken} in your wallet`, disabled: true };
     if (minimum > 0 && amountNumber < minimum)
-      return { label: `Minimum ${amountOf(depositToken, minimum, depositMultiplier)}`, disabled: true };
+      return { label: `Minimum ${amountOf(depositToken, minimum)}`, disabled: true };
     if (maximum > 0 && amountNumber > maximum)
-      return { label: `Maximum ${amountOf(depositToken, maximum, depositMultiplier)}`, disabled: true };
+      return { label: `Maximum ${amountOf(depositToken, maximum)}`, disabled: true };
     if (client.ready.contracts) {
       if ((allowance ?? 0) < amountNumber) return { label: `Approve ${depositToken}`, onClick: onApprove };
       if (!client.ready.quotes) return { label: "Quotes are unavailable right now", disabled: true };
       if (quoteLoading) return { label: "Fetching quote…", disabled: true };
-      if (quoteError || !quote || staleQuote) return { label: "Refresh quote", onClick: refreshQuote };
+      if (quoteError || !quoteFits || staleQuote) return { label: "Refresh quote", onClick: refreshQuote };
     }
     return { label: "Subscribe", onClick: onSubscribe };
   })();
@@ -215,7 +225,7 @@ function Subscribe({ symbol }: { symbol: string }) {
   if (!product) {
     return (
       <div className="py-[48px]">
-        <p className="text-[18px] text-dim">
+        <p className="break-words text-[18px] text-dim">
           {loading ? "Loading…" : `${symbol} has no products open this week.`}
         </p>
         {!loading && (
@@ -276,13 +286,7 @@ function Subscribe({ symbol }: { symbol: string }) {
                 }
                 value={
                   outcomes
-                    ? withPremium(
-                        amountOf(
-                          outcomes.converted.token,
-                          outcomes.converted.amount,
-                          outcomes.converted.token === USDG.symbol ? 1 : stockMultiplier,
-                        ),
-                      )
+                    ? withPremium(amountOf(outcomes.converted.token, outcomes.converted.amount))
                     : "—"
                 }
                 accent
@@ -290,15 +294,7 @@ function Subscribe({ symbol }: { symbol: string }) {
               <Outcome
                 label={direction === "buyLow" ? "If it closes above" : "If it closes below"}
                 value={
-                  outcomes
-                    ? withPremium(
-                        amountOf(
-                          outcomes.kept.token,
-                          outcomes.kept.amount,
-                          outcomes.kept.token === USDG.symbol ? 1 : stockMultiplier,
-                        ),
-                      )
-                    : "—"
+                  outcomes ? withPremium(amountOf(outcomes.kept.token, outcomes.kept.amount)) : "—"
                 }
               />
             </dl>
@@ -375,8 +371,7 @@ function Subscribe({ symbol }: { symbol: string }) {
               </h2>
               {balance !== undefined && (
                 <span className="t-mono-sm tabular text-dim">
-                  Balance{" "}
-                  {direction === "buyLow" ? usd(balance) : qty(balance, 4, stockMultiplier)}
+                  Balance {direction === "buyLow" ? usd(balance) : qty(balance, 4)}
                 </span>
               )}
             </div>
@@ -384,16 +379,16 @@ function Subscribe({ symbol }: { symbol: string }) {
               <input
                 inputMode="decimal"
                 value={amount}
-                onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))}
+                onChange={(e) => setAmount(cleanAmount(e.target.value))}
                 placeholder="0.00"
                 aria-label={`Amount in ${depositToken}`}
-                className="h-[52px] w-full bg-transparent text-[20px] tabular text-ink outline-none placeholder:text-dim"
+                className="h-[52px] w-full min-w-0 bg-transparent text-[20px] tabular text-ink outline-none placeholder:text-dim"
               />
               <span className="t-mono-sm text-dim">{depositToken}</span>
               <button
                 type="button"
-                onClick={() => balance !== undefined && setAmount(String(balance))}
-                disabled={balance === undefined}
+                onClick={() => exactBalance !== undefined && setAmount(exactBalance)}
+                disabled={exactBalance === undefined}
                 className="t-mono-sm rounded-[6px] bg-nav px-[10px] py-[6px] text-ink hover:bg-nav-hover disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Max
@@ -414,7 +409,7 @@ function Subscribe({ symbol }: { symbol: string }) {
               label="Premium amount"
               value={
                 amountNumber > 0 && premiumBps !== undefined
-                  ? amountOf(depositToken, (amountNumber * premiumBps) / 10_000, depositMultiplier)
+                  ? amountOf(depositToken, (amountNumber * premiumBps) / 10_000)
                   : "—"
               }
             />
@@ -442,7 +437,7 @@ function Subscribe({ symbol }: { symbol: string }) {
             <p className="mt-[12px] text-[14px] text-[#8A3B2F]">{error ?? quoteError}</p>
           )}
 
-          {quote && !staleQuote && !quoteLoading && (
+          {quote && quoteFits && !staleQuote && !quoteLoading && (
             <p className="mt-[12px] t-mono-sm text-dim">
               Quote good for {Math.max(0, Math.ceil((quote.expiresAt - now) / 1000))}s
             </p>
@@ -451,6 +446,13 @@ function Subscribe({ symbol }: { symbol: string }) {
       </div>
     </div>
   );
+}
+
+/** Digits and one decimal point. A comma is taken as the point, as typed on many keyboards. */
+function cleanAmount(value: string) {
+  const text = value.replace(/,/g, ".").replace(/[^0-9.]/g, "");
+  const dot = text.indexOf(".");
+  return dot === -1 ? text : `${text.slice(0, dot + 1)}${text.slice(dot + 1).replace(/\./g, "")}`;
 }
 
 function Outcome({ label, value, accent }: { label: string; value: string; accent?: boolean }) {

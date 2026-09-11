@@ -26,6 +26,7 @@ import {
 import { currentWeek } from "./schedule";
 import type {
   Address,
+  Balance,
   Direction,
   NuvoClient,
   Position,
@@ -62,7 +63,49 @@ export class NoWalletError extends Error {
   }
 }
 
-const toNumber = (value: bigint, decimals: number) => Number(formatUnits(value, decimals));
+/**
+ * The transaction was sent but its receipt did not come back in time. It may
+ * still land, so this must not read as a failure that invites a second one.
+ */
+export class TxPendingError extends Error {
+  constructor(readonly hash: Address) {
+    super("Transaction is still pending. Check the explorer before trying again.");
+    this.name = "TxPendingError";
+  }
+}
+
+/** The transaction was mined and reverted. */
+export class TxRevertedError extends Error {
+  constructor(readonly hash: Address) {
+    super("Transaction failed. Try again.");
+    this.name = "TxRevertedError";
+  }
+}
+
+const WAD = 10n ** 18n;
+
+/**
+ * ERC-8056 multiplier as 18-decimal fixed point. A token that reports a small
+ * plain factor instead (2 after a 2:1 split) is read as that factor; none, or
+ * zero, is 1.
+ */
+const multiplierWad = (value: bigint) =>
+  value <= 0n ? WAD : value < 10n ** 9n ? value * WAD : value;
+
+/** Typed text, cut to the token's decimals so it never rounds up. */
+const truncate = (amount: string, decimals: number) => {
+  const [whole = "", fraction = ""] = amount.trim().split(".");
+  const cut = fraction.slice(0, decimals);
+  return `${whole || "0"}${cut ? `.${cut}` : ""}`;
+};
+
+/** Display units, as typed, to the token's base units. Exact, rounded down. */
+const toBase = (amount: string, token: TokenInfo) =>
+  (parseUnits(truncate(amount, token.decimals), token.decimals) * WAD) / token.uiMultiplierWad;
+
+/** Base units to display units, rounded down, as an exact decimal string. */
+const toDisplay = (value: bigint, token: TokenInfo) =>
+  formatUnits((value * token.uiMultiplierWad) / WAD, token.decimals);
 
 export class ChainClient implements NuvoClient {
   readonly ready = {
@@ -108,6 +151,8 @@ export class ChainClient implements NuvoClient {
   private writer() {
     if (!this.wallet || !this.account) throw new NoWalletError();
     if (!NETWORK.nuvo) throw new NotConfiguredError("The Nuvo contract");
+    // Without a reader the receipt could not be awaited after sending.
+    this.reader();
     return { wallet: this.wallet, account: this.account, nuvo: NETWORK.nuvo };
   }
 
@@ -131,16 +176,17 @@ export class ChainClient implements NuvoClient {
       client.readContract({ ...contract, functionName: "name" }).catch(() => key),
       client.readContract({ ...contract, functionName: "decimals" }),
       // ERC-8056 is optional on a token; without it amounts are shown as they are.
-      // TODO(stage 2): confirm the multiplier scaling against the final token.
-      client.readContract({ ...contract, functionName: "uiMultiplier" }).catch(() => 1n),
+      client.readContract({ ...contract, functionName: "uiMultiplier" }).catch(() => 0n),
     ]);
 
+    const wad = multiplierWad(BigInt(multiplier));
     const info: TokenInfo = {
       symbol: key,
       address,
       name: String(name),
       decimals: Number(decimals),
-      uiMultiplier: Number(multiplier) || 1,
+      uiMultiplier: Number(formatUnits(wad, 18)),
+      uiMultiplierWad: wad,
     };
     this.tokens.set(key, info);
     return info;
@@ -179,7 +225,11 @@ export class ChainClient implements NuvoClient {
       const body = (await response.json()) as {
         premiums?: { productId: string; premiumBps: number }[];
       };
-      return new Map((body.premiums ?? []).map((p) => [p.productId.toLowerCase(), p.premiumBps]));
+      return new Map(
+        (body.premiums ?? [])
+          .filter((p) => typeof p.productId === "string" && isPremium(p.premiumBps))
+          .map((p) => [p.productId.toLowerCase(), p.premiumBps]),
+      );
     } catch {
       return new Map();
     }
@@ -245,56 +295,70 @@ export class ChainClient implements NuvoClient {
     return perToken.flat();
   }
 
-  async getQuote(product: Product, amount: number): Promise<Quote> {
+  async getQuote(product: Product, amount: string): Promise<Quote> {
     if (!hasQuotes()) throw new QuoteUnavailableError();
 
     const depositSymbol = product.direction === "buyLow" ? USDG.symbol : product.ticker;
     const token = await this.getToken(depositSymbol);
+    const value = Number(amount);
 
     const response = await fetch(`${QUOTE_API}/quote`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify({
         productId: product.id,
-        amount: parseUnits(amount.toFixed(token.decimals), token.decimals).toString(),
+        amount: toBase(amount, token).toString(),
         account: this.account,
       }),
     }).catch(() => null);
 
     if (!response?.ok) throw new QuoteUnavailableError();
 
-    const body = (await response.json()) as {
-      premiumBps: number;
-      signature: Address;
-      expiresAt?: number;
+    const body = (await response.json().catch(() => ({}))) as {
+      premiumBps?: unknown;
+      signature?: unknown;
+      expiresAt?: unknown;
     };
-    if (typeof body.premiumBps !== "number" || !body.signature) throw new QuoteUnavailableError();
+    if (!isPremium(body.premiumBps)) throw new QuoteUnavailableError();
+    if (typeof body.signature !== "string" || !/^0x[0-9a-fA-F]+$/.test(body.signature)) {
+      throw new QuoteUnavailableError();
+    }
+    const premiumBps = body.premiumBps;
 
-    const r = body.premiumBps / 10_000;
+    // README: expiresAt is in ms. A value in seconds is taken as seconds.
+    const expiresAt =
+      typeof body.expiresAt === "number" && Number.isFinite(body.expiresAt)
+        ? body.expiresAt < 1e12
+          ? body.expiresAt * 1000
+          : body.expiresAt
+        : Date.now() + QUOTE_TTL_MS;
+
+    const r = premiumBps / 10_000;
     // Brief 1: D x (1 + r) / K stock or D x (1 + r) USDG for Buy Low,
     // Q x K x (1 + r) USDG or Q x (1 + r) stock for Sell High.
     const converted =
       product.direction === "buyLow"
-        ? { token: product.ticker, amount: (amount * (1 + r)) / product.targetPrice }
-        : { token: USDG.symbol, amount: amount * product.targetPrice * (1 + r) };
+        ? { token: product.ticker, amount: (value * (1 + r)) / product.targetPrice }
+        : { token: USDG.symbol, amount: value * product.targetPrice * (1 + r) };
     const kept =
       product.direction === "buyLow"
-        ? { token: USDG.symbol, amount: amount * (1 + r) }
-        : { token: product.ticker, amount: amount * (1 + r) };
+        ? { token: USDG.symbol, amount: value * (1 + r) }
+        : { token: product.ticker, amount: value * (1 + r) };
 
     return {
       productId: product.id,
-      amount,
-      premiumBps: body.premiumBps,
-      premiumAmount: amount * r,
+      amount: value,
+      input: amount,
+      premiumBps,
+      premiumAmount: value * r,
       ifConverted: converted,
       ifNot: kept,
-      signature: body.signature,
-      expiresAt: body.expiresAt ?? Date.now() + QUOTE_TTL_MS,
+      signature: body.signature as Address,
+      expiresAt,
     };
   }
 
-  async getBalances(address?: Address): Promise<Record<string, number>> {
+  async getBalances(address?: Address): Promise<Record<string, Balance>> {
     const owner = address ?? this.account;
     if (!owner || !hasNetwork()) return {};
 
@@ -311,14 +375,17 @@ export class ChainClient implements NuvoClient {
             functionName: "balanceOf",
             args: [owner],
           });
-          return [symbol, toNumber(balance, token.decimals)] as const;
+          const exact = toDisplay(balance, token);
+          return [symbol, { amount: Number(exact), exact }] as const;
         } catch {
           return null;
         }
       }),
     );
 
-    return Object.fromEntries(entries.filter((entry): entry is readonly [string, number] => !!entry));
+    return Object.fromEntries(
+      entries.filter((entry): entry is readonly [string, Balance] => !!entry),
+    );
   }
 
   async getAllowance(symbol: string, owner?: Address): Promise<number> {
@@ -332,7 +399,7 @@ export class ChainClient implements NuvoClient {
         functionName: "allowance",
         args: [account, NETWORK.nuvo],
       });
-      return toNumber(allowance, token.decimals);
+      return Number(toDisplay(allowance, token));
     } catch {
       return 0;
     }
@@ -341,15 +408,22 @@ export class ChainClient implements NuvoClient {
   /** Hands the hash out as soon as the wallet signs, then waits for the receipt. */
   private async send(hash: Address, onSubmitted?: (hash: Address) => void): Promise<TxResult> {
     onSubmitted?.(hash);
-    const receipt = await this.reader().waitForTransactionReceipt({ hash });
+    let status: "success" | "reverted";
+    try {
+      ({ status } = await this.reader().waitForTransactionReceipt({ hash }));
+    } catch {
+      // Only the wait gave up; the transaction itself is out.
+      this.emit();
+      throw new TxPendingError(hash);
+    }
     this.emit();
-    if (receipt.status === "reverted") throw new Error("Transaction failed. Try again.");
+    if (status === "reverted") throw new TxRevertedError(hash);
     return { hash };
   }
 
   async approve(
     symbol: string,
-    amount: number,
+    amount: string,
     onSubmitted?: (hash: Address) => void,
   ): Promise<TxResult> {
     const { wallet, account, nuvo } = this.writer();
@@ -358,7 +432,7 @@ export class ChainClient implements NuvoClient {
       address: token.address,
       abi: erc20Abi,
       functionName: "approve",
-      args: [nuvo, parseUnits(amount.toFixed(token.decimals), token.decimals)],
+      args: [nuvo, toBase(amount, token)],
       account,
       chain: nuvoChain,
     });
@@ -367,11 +441,15 @@ export class ChainClient implements NuvoClient {
 
   async subscribe(
     product: Product,
-    amount: number,
+    amount: string,
     quote: Quote,
     onSubmitted?: (hash: Address) => void,
   ): Promise<TxResult> {
     const { wallet, account, nuvo } = this.writer();
+    // The signature covers one product and one amount; anything else would revert.
+    if (quote.productId !== product.id || quote.input !== amount || Date.now() > quote.expiresAt) {
+      throw new QuoteUnavailableError("The quote has expired. Refresh it.");
+    }
     const depositSymbol = product.direction === "buyLow" ? USDG.symbol : product.ticker;
     const token = await this.getToken(depositSymbol);
 
@@ -379,11 +457,7 @@ export class ChainClient implements NuvoClient {
       address: nuvo,
       abi: nuvoDualAbi,
       functionName: "subscribe",
-      args: [
-        product.id,
-        parseUnits(amount.toFixed(token.decimals), token.decimals),
-        quote.signature,
-      ],
+      args: [product.id, toBase(amount, token), quote.signature],
       account,
       chain: nuvoChain,
     });
@@ -445,7 +519,7 @@ export class ChainClient implements NuvoClient {
           direction,
           targetPrice: Number(formatUnits(targetPrice, 8)),
           premiumBps: Number(premiumBps),
-          amount: toNumber(amount, deposit.decimals),
+          amount: Number(toDisplay(amount, deposit)),
           depositToken: deposit.symbol,
           subscribedAt: Number(subscribedAt) * 1000,
           expiresAt: Number(expiry) * 1000,
@@ -455,7 +529,7 @@ export class ChainClient implements NuvoClient {
                 settlement: {
                   settlePrice: Number(formatUnits(settlePrice, 8)),
                   converted: payoutToken.toLowerCase() !== depositToken.toLowerCase(),
-                  payout: { token: payout.symbol, amount: toNumber(payoutAmount, payout.decimals) },
+                  payout: { token: payout.symbol, amount: Number(toDisplay(payoutAmount, payout)) },
                 },
               }
             : {}),
@@ -483,7 +557,14 @@ export class ChainClient implements NuvoClient {
         // Not configured; try the other one.
       }
     }
-    return { symbol: ticker, address, name: ticker, decimals: 18, uiMultiplier: 1 };
+    return {
+      symbol: ticker,
+      address,
+      name: ticker,
+      decimals: 18,
+      uiMultiplier: 1,
+      uiMultiplierWad: WAD,
+    };
   }
 
   async claim(positionId: string, onSubmitted?: (hash: Address) => void): Promise<TxResult> {
@@ -498,6 +579,11 @@ export class ChainClient implements NuvoClient {
     });
     return this.send(hash, onSubmitted);
   }
+}
+
+/** A weekly premium the UI can show: a finite number of bps under 100%. */
+function isPremium(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value < 10_000;
 }
 
 /** Tickers are bytes32 on chain, right-padded with zeros. */

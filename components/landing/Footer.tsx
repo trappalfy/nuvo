@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { motion, useMotionTemplate, useMotionValue, useMotionValueEvent, useScroll } from "motion/react";
+import { SOCIAL } from "@/lib/nuvo/config";
 import { ArrowUp } from "../ui/Arrow";
 import { SplitButton } from "../ui/SplitButton";
 import { GiantWord } from "./GiantWord";
@@ -14,11 +15,9 @@ const NAVIGATE = [
   { label: "App", href: "/app" },
 ];
 
-// Brief 12: the social links are still an open question, so these are placeholders.
-const CONNECT = [
-  { label: "X", href: "#" },
-  { label: "Telegram", href: "#" },
-];
+// Brief 12: the social links come from env. Until one is set, the column stays
+// empty rather than linking nowhere.
+const CONNECT = SOCIAL;
 
 // Brief 6.5: the footer sits under the content. The light section scrolls up and
 // uncovers it, so the footer is clipped to whatever falls below the bottom edge
@@ -82,17 +81,27 @@ export function Footer() {
             </ul>
           </div>
 
-          <div className="border-l border-hair pl-[20px]">
-            <h2 className="t-mono-sm text-white/60">Connect</h2>
-            <ul className="mt-[18px] flex flex-col">
-              {CONNECT.map((item) => (
-                <li key={item.label}>
-                  <Link href={item.href} className="t-link text-white hover:underline">
-                    {item.label}
-                  </Link>
-                </li>
-              ))}
-            </ul>
+          {/* The column keeps its place in the grid even while it has no links. */}
+          <div className={CONNECT.length > 0 ? "border-l border-hair pl-[20px]" : "hidden lg:block"}>
+            {CONNECT.length > 0 && (
+              <>
+                <h2 className="t-mono-sm text-white/60">Connect</h2>
+                <ul className="mt-[18px] flex flex-col">
+                  {CONNECT.map((item) => (
+                    <li key={item.label}>
+                      <a
+                        href={item.href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="t-link text-white hover:underline"
+                      >
+                        {item.label}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
           </div>
 
           <div className="lg:flex lg:justify-end">

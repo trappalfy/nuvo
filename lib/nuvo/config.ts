@@ -85,8 +85,15 @@ export const TOKEN = {
   url: clean(process.env.NEXT_PUBLIC_TOKEN_URL),
 };
 
+/** Social links for the footer. Only https links are shown; the rest are left out. */
+export const SOCIAL = [
+  { label: "X", href: clean(process.env.NEXT_PUBLIC_X_URL) },
+  { label: "Telegram", href: clean(process.env.NEXT_PUBLIC_TELEGRAM_URL) },
+].filter((link) => /^https:\/\/\S+$/.test(link.href));
+
 export const hasNetwork = () => NETWORK.chainId > 0 && NETWORK.rpcUrl.length > 0;
-export const hasContracts = () => Boolean(NETWORK.nuvo && USDG.address);
+/** Writes need the network too: the receipt is awaited through it. */
+export const hasContracts = () => hasNetwork() && Boolean(NETWORK.nuvo && USDG.address);
 export const hasProducts = () => hasNetwork() && TOKENS.length > 0;
 export const hasQuotes = () => QUOTE_API.length > 0;
 

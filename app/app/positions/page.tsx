@@ -25,10 +25,12 @@ export default function PositionsPage() {
   const [claiming, setClaiming] = useState<string | null>(null);
   const wallet = useWallet();
   const toast = useToast();
-  const { data: positions, loading } = useNuvo(
-    (c) => c.getPositions(wallet.address as Address | undefined),
-    [wallet.address],
-  );
+  const {
+    data: positions,
+    loading,
+    error: loadError,
+    refresh,
+  } = useNuvo((c) => c.getPositions(wallet.address as Address | undefined), [wallet.address]);
 
   const shown = (positions ?? []).filter((p) =>
     tab === "active"
@@ -40,7 +42,11 @@ export default function PositionsPage() {
 
   const claim = async (position: Position) => {
     // Contract writes stay inert until the Nuvo contract is configured.
-    if (!client.ready.contracts) return;
+    if (!client.ready.contracts || claiming) return;
+    if (!wallet.isRightNetwork) {
+      wallet.switchNetwork();
+      return;
+    }
     setClaiming(position.id);
     try {
       const tx = await client.claim(position.id, (hash) =>
@@ -98,7 +104,24 @@ export default function PositionsPage() {
         <p className="mt-[28px] text-[16px] text-dim">Loading positions…</p>
       )}
 
-      {wallet.isConnected && !loading && shown.length === 0 && (
+      {/* A failed read must not look like an empty account. */}
+      {wallet.isConnected && !loading && loadError && (
+        <div className="mt-[28px] rounded-[16px] bg-white p-[32px]">
+          <p className="text-[18px] text-ink">Could not load your positions.</p>
+          <p className="mt-[8px] max-w-[520px] text-[15px] leading-[1.5] text-dim">
+            The network did not answer. Your positions are on chain and are not affected.
+          </p>
+          <button
+            type="button"
+            onClick={refresh}
+            className="t-mono mt-[20px] inline-flex h-[44px] items-center rounded-[8px] bg-ink px-[18px] text-white hover:bg-ink-hover"
+          >
+            Try again
+          </button>
+        </div>
+      )}
+
+      {wallet.isConnected && !loading && !loadError && shown.length === 0 && (
         <div className="mt-[28px] rounded-[16px] bg-white p-[32px]">
           <p className="text-[18px] text-ink">No positions yet. Pick a product.</p>
           <Link
@@ -112,6 +135,7 @@ export default function PositionsPage() {
 
       <div className="mt-[28px] flex flex-col gap-[12px]">
         {wallet.isConnected &&
+          !loadError &&
           shown.map((position) => (
             <article key={position.id} className="rounded-[16px] bg-white p-[24px]">
               <div className="flex flex-wrap items-start justify-between gap-[16px]">
@@ -138,7 +162,11 @@ export default function PositionsPage() {
                     disabled={claiming === position.id}
                     className="inline-flex h-[44px] items-center rounded-[8px] bg-ink px-[18px] t-mono text-white transition-colors duration-200 hover:bg-ink-hover disabled:cursor-not-allowed disabled:bg-nav disabled:text-dim"
                   >
-                    {claiming === position.id ? "Confirming…" : "Claim"}
+                    {claiming === position.id
+                      ? "Confirming…"
+                      : wallet.isRightNetwork
+                        ? "Claim"
+                        : "Switch network"}
                   </button>
                 )}
               </div>
