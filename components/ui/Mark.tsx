@@ -1,29 +1,35 @@
-// Brief 5: there is no logo yet. The mark is an outlined circle crossed by a
-// horizontal line just below centre — the level a product settles at. Everything
-// goes through this file so the final logo is a one-file change.
-export function Mark({ size = 26, className }: { size?: number; className?: string }) {
+// The Nuvo mark, traced from Nuvo-logo.png into one path. It is drawn in
+// currentColor, so it takes the colour of the text around it — white on the
+// hero, ink on the plate — and stays sharp at any size. Everything goes through
+// this file, so a change to the logo is a one-file change. app/icon.svg and the
+// images in public/brand carry the same path.
+
+export const MARK_VIEWBOX = "279 262 696 682";
+
+export const MARK_PATH =
+  "M 398.2 264.1 C 309.4 271.8, 254.3 367.0, 292.5 446.8 C 308.2 479.7, 334.1 501.9, 373.5 516.4 C 451.3 545.0, 502.5 576.8, 551.0 626.6 C 595.1 672.0, 630.3 722.9, 681.4 815.5 C 727.1 898.0, 739.6 913.4, 775.3 930.5 C 842.8 962.9, 924.0 928.9, 951.5 856.8 C 963.1 826.5, 961.3 788.5, 946.9 759.9 C 941.8 749.6, 938.5 744.4, 923.8 722.9 C 885.7 667.1, 877.2 641.5, 883.6 601.6 C 887.9 574.2, 898.4 551.6, 927.9 506.5 C 954.1 466.4, 961.6 452.9, 967.5 434.6 C 989.5 367.0, 953.8 293.2, 888.5 270.7 C 816.0 245.7, 737.1 287.5, 718.0 360.9 C 706.2 406.2, 716.0 445.4, 749.9 488.5 C 795.7 546.7, 821.5 606.6, 816.9 644.6 C 811.2 692.7, 767.9 717.7, 724.3 698.0 C 699.2 686.6, 677.6 662.8, 654.1 620.8 C 625.7 569.9, 575.4 457.8, 542.3 371.5 C 531.6 343.6, 527.5 335, 519.4 322.8 C 492.3 282.1, 446.4 259.8, 398.2 264.1 M 402 677.6 C 367.1 681.5, 341.5 693.3, 318.9 715.9 C 266.8 768.0, 267.5 850.6, 320.3 901.7 C 355.8 936.1, 407.8 947.6, 453.2 931.3 C 496.5 915.7, 529.7 877.3, 538.6 832.2 C 541.0 820.1, 541.0 795.6, 538.7 783.8 C 526.5 723.2, 476.9 680.3, 416 677.6 C 410.2 677.4, 403.9 677.3, 402 677.6";
+
+/** The mark on its own. `size` is the width; the height follows the mark. */
+export function Mark({ size = 24, className }: { size?: number; className?: string }) {
   return (
     <svg
       width={size}
-      height={size}
-      viewBox="0 0 32 32"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
+      height={Math.round((size * 682) / 696 * 10) / 10}
+      viewBox={MARK_VIEWBOX}
+      fill="currentColor"
       aria-hidden="true"
       className={className}
     >
-      <circle cx="16" cy="16" r="12" />
-      <line x1="2" y1="18.5" x2="30" y2="18.5" strokeLinecap="round" />
+      <path d={MARK_PATH} fillRule="evenodd" />
     </svg>
   );
 }
 
-/** Mark 26px + 10px gap + the word, as specified in brief 5. */
+/** The mark, a 10px gap and the word. */
 export function Lockup({ className }: { className?: string }) {
   return (
     <span className={`inline-flex items-center ${className ?? ""}`}>
-      <Mark size={26} />
+      <Mark size={24} />
       <span className="ml-[10px] text-[26px] leading-none tracking-[-0.03em]">Nuvo</span>
     </span>
   );

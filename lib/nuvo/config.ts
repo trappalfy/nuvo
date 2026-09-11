@@ -19,6 +19,9 @@ export const NETWORK = {
   nuvo: asAddress(clean(process.env.NEXT_PUBLIC_NUVO_ADDRESS)),
 };
 
+/** The public address of the site: absolute links for the preview image and the wallet prompt. */
+export const SITE_URL = clean(process.env.NEXT_PUBLIC_SITE_URL).replace(/\/$/, "");
+
 export const USDG = {
   symbol: clean(process.env.NEXT_PUBLIC_USDG_SYMBOL) || "USDG",
   address: asAddress(clean(process.env.NEXT_PUBLIC_USDG_ADDRESS)),

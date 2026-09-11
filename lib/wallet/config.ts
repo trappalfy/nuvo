@@ -6,7 +6,7 @@ import {
   walletConnectWallet,
 } from "@rainbow-me/rainbowkit/wallets";
 import { createConfig, http } from "wagmi";
-import { NETWORK } from "../nuvo/config";
+import { NETWORK, SITE_URL } from "../nuvo/config";
 import { nuvoChain } from "./chain";
 
 // Brief 2: wagmi + viem + RainbowKit, on the network from env.
@@ -26,7 +26,13 @@ const connectors = connectorsForWallets(
         : [injectedWallet],
     },
   ],
-  { appName: "Nuvo", projectId: projectId || "nuvo" },
+  {
+    appName: "Nuvo",
+    appDescription: "Dual investment on tokenized stocks.",
+    projectId: projectId || "nuvo",
+    // Mobile wallets show this name, link and icon when they connect over WalletConnect.
+    ...(SITE_URL ? { appUrl: SITE_URL, appIcon: `${SITE_URL}/brand/nuvo-icon-512.png` } : {}),
+  },
 );
 
 export const wagmiConfig = createConfig({
