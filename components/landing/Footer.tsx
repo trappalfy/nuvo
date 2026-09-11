@@ -10,6 +10,7 @@ import { GiantWord } from "./GiantWord";
 const NAVIGATE = [
   { label: "How it works", href: "/#how-it-works" },
   { label: "Products", href: "/#products" },
+  { label: "Token", href: "/token" },
   { label: "App", href: "/app" },
 ];
 

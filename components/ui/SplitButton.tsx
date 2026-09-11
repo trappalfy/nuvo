@@ -12,6 +12,8 @@ const LIME_CLIP = "polygon(8px 0, 100% 0, 100% 100%, 0 100%)";
 type Props = {
   label?: string;
   href?: string;
+  /** Opens `href` in a new tab. */
+  external?: boolean;
   onClick?: () => void;
   disabled?: boolean;
   /** true = always full width, "mobile" = full width under lg. */
@@ -24,6 +26,7 @@ type Props = {
 export function SplitButton({
   label = "Launch app",
   href,
+  external = false,
   onClick,
   disabled = false,
   full = false,
@@ -64,6 +67,14 @@ export function SplitButton({
     disabled ? "pointer-events-none" : "",
     className ?? "",
   ].join(" ");
+
+  if (href && !disabled && external) {
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer" className={shell} aria-label={label}>
+        {body}
+      </a>
+    );
+  }
 
   if (href && !disabled) {
     return (

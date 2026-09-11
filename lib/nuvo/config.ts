@@ -2,25 +2,28 @@ import type { Address, TokenConfig } from "./types";
 
 // Every address and endpoint comes from env. Nothing here is a stand-in for
 // data: if a value is missing the app says so rather than inventing it.
+//
+// Each variable is read as a literal `process.env.NEXT_PUBLIC_*`: Next inlines
+// only those into the browser bundle, a lookup by name comes back empty there.
 
-const env = (name: string) => (process.env[name] ?? "").trim();
+const clean = (value: string | undefined) => (value ?? "").trim();
 
 const asAddress = (value: string): Address | undefined =>
   /^0x[a-fA-F0-9]{40}$/.test(value) ? (value as Address) : undefined;
 
 export const NETWORK = {
-  chainId: Number(env("NEXT_PUBLIC_CHAIN_ID") || 0),
-  name: env("NEXT_PUBLIC_CHAIN_NAME") || "Robinhood Chain",
-  rpcUrl: env("NEXT_PUBLIC_RPC_URL"),
-  explorerUrl: env("NEXT_PUBLIC_EXPLORER_URL"),
-  nuvo: asAddress(env("NEXT_PUBLIC_NUVO_ADDRESS")),
+  chainId: Number(clean(process.env.NEXT_PUBLIC_CHAIN_ID) || 0),
+  name: clean(process.env.NEXT_PUBLIC_CHAIN_NAME) || "Robinhood Chain",
+  rpcUrl: clean(process.env.NEXT_PUBLIC_RPC_URL),
+  explorerUrl: clean(process.env.NEXT_PUBLIC_EXPLORER_URL),
+  nuvo: asAddress(clean(process.env.NEXT_PUBLIC_NUVO_ADDRESS)),
 };
 
 export const USDG = {
-  symbol: env("NEXT_PUBLIC_USDG_SYMBOL") || "USDG",
-  address: asAddress(env("NEXT_PUBLIC_USDG_ADDRESS")),
+  symbol: clean(process.env.NEXT_PUBLIC_USDG_SYMBOL) || "USDG",
+  address: asAddress(clean(process.env.NEXT_PUBLIC_USDG_ADDRESS)),
   /** Read from the token on first use; this is only the fallback for display. */
-  decimals: Number(env("NEXT_PUBLIC_USDG_DECIMALS") || 6),
+  decimals: Number(clean(process.env.NEXT_PUBLIC_USDG_DECIMALS) || 6),
 };
 
 /**
@@ -31,7 +34,7 @@ export const USDG = {
  * The feed is the reference the product settles on. Symbol, name, decimals and
  * the ERC-8056 UI multiplier are read from the token itself.
  */
-export const TOKENS: TokenConfig[] = env("NEXT_PUBLIC_STOCK_TOKENS")
+export const TOKENS: TokenConfig[] = clean(process.env.NEXT_PUBLIC_STOCK_TOKENS)
   .split(",")
   .map((entry) => entry.trim())
   .filter(Boolean)
@@ -46,7 +49,7 @@ export const TOKENS: TokenConfig[] = env("NEXT_PUBLIC_STOCK_TOKENS")
  * The market maker quote service. It signs the premium the contract accepts, so
  * without it products can be listed but not subscribed to.
  */
-export const QUOTE_API = env("NEXT_PUBLIC_QUOTE_API").replace(/\/$/, "");
+export const QUOTE_API = clean(process.env.NEXT_PUBLIC_QUOTE_API).replace(/\/$/, "");
 
 /** Brief 1: the ladder, as a distance from the reference in percent. */
 export const LADDER = [2, 4, 6, 8] as const;
@@ -63,13 +66,24 @@ export const SCHEDULE = {
 
 /** Limits per product, in the deposited asset. Zero means no limit. */
 export const LIMITS = {
-  minUsdg: Number(env("NEXT_PUBLIC_MIN_USDG") || 0),
-  maxUsdg: Number(env("NEXT_PUBLIC_MAX_USDG") || 0),
-  minStockValueUsdg: Number(env("NEXT_PUBLIC_MIN_STOCK_VALUE_USDG") || 0),
+  minUsdg: Number(clean(process.env.NEXT_PUBLIC_MIN_USDG) || 0),
+  maxUsdg: Number(clean(process.env.NEXT_PUBLIC_MAX_USDG) || 0),
+  minStockValueUsdg: Number(clean(process.env.NEXT_PUBLIC_MIN_STOCK_VALUE_USDG) || 0),
 };
 
 /** Quotes older than this have to be refreshed before subscribing. */
 export const QUOTE_TTL_MS = 30_000;
+
+/**
+ * The Nuvo token. Empty until launch, and the Token page says so. The address is
+ * kept as written rather than checked as 0x…, the token may launch on another chain.
+ */
+export const TOKEN = {
+  address: clean(process.env.NEXT_PUBLIC_TOKEN_ADDRESS),
+  symbol: clean(process.env.NEXT_PUBLIC_TOKEN_SYMBOL).replace(/^\$/, "").toUpperCase(),
+  network: clean(process.env.NEXT_PUBLIC_TOKEN_NETWORK) || NETWORK.name,
+  url: clean(process.env.NEXT_PUBLIC_TOKEN_URL),
+};
 
 export const hasNetwork = () => NETWORK.chainId > 0 && NETWORK.rpcUrl.length > 0;
 export const hasContracts = () => Boolean(NETWORK.nuvo && USDG.address);
@@ -81,5 +95,9 @@ export const explorerTx = (hash: string) =>
 
 export const explorerAddress = (address: string) =>
   NETWORK.explorerUrl ? `${NETWORK.explorerUrl.replace(/\/$/, "")}/address/${address}` : undefined;
+
+/** Where "View contract" goes: the link from env, else the address on the network explorer. */
+export const tokenUrl = () =>
+  TOKEN.url || (TOKEN.address ? explorerAddress(TOKEN.address) : undefined);
 
 export const tokenOf = (symbol: string) => TOKENS.find((t) => t.symbol === symbol.toUpperCase());

@@ -6,19 +6,21 @@ import { AnimatePresence, motion, useMotionValueEvent, useScroll } from "motion/
 import { Lockup } from "../ui/Mark";
 
 const NAV = [
-  { label: "How it works", href: "/#how-it-works" },
+  { label: "Token", href: "/token" },
   { label: "Products", href: "/#products" },
 ];
 
 // Brief 6.1: fixed header over everything. The lockup is white on the hero and
-// sits on a blurred plate in `ink` once the hero is behind.
-export function Header() {
-  const [past, setPast] = useState(false);
+// sits on a blurred plate in `ink` once the hero is behind. `solid` is for pages
+// without the video, where it starts in the ink state.
+export function Header({ solid = false }: { solid?: boolean }) {
+  const [scrolled, setScrolled] = useState(false);
   const [menu, setMenu] = useState(false);
   const { scrollY } = useScroll();
+  const past = solid || scrolled;
 
   useMotionValueEvent(scrollY, "change", (y) => {
-    setPast(y > window.innerHeight * 0.8);
+    setScrolled(y > window.innerHeight * 0.8);
   });
 
   return (
