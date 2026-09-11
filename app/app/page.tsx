@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { DirectionToggle } from "@/components/app/DirectionToggle";
 import { TargetChip } from "@/components/app/TargetChip";
 import { usd } from "@/lib/format";
-import { TICKERS, tickerOf } from "@/lib/nuvo/config";
+import { TOKENS } from "@/lib/nuvo/config";
 import { useNuvo } from "@/lib/nuvo/useNuvo";
 import type { Direction, Product } from "@/lib/nuvo/types";
 
@@ -13,6 +13,15 @@ export default function ProductsPage() {
   const [direction, setDirection] = useState<Direction>("buyLow");
   const [query, setQuery] = useState("");
   const { data: products, loading } = useNuvo((c) => c.listProducts(direction), [direction]);
+  const { data: tokens } = useNuvo(
+    (c) => Promise.all(TOKENS.map((t) => c.getToken(t.symbol).catch(() => null))),
+    [],
+  );
+
+  const names = useMemo(
+    () => new Map((tokens ?? []).flatMap((t) => (t ? [[t.symbol, t.name] as const] : []))),
+    [tokens],
+  );
 
   const rows = useMemo(() => {
     const bySymbol = new Map<string, Product[]>();
@@ -22,10 +31,15 @@ export default function ProductsPage() {
       bySymbol.set(product.ticker, list);
     }
     const term = query.trim().toUpperCase();
-    return TICKERS.filter((t) => !term || t.symbol.includes(term) || t.name.toUpperCase().includes(term))
-      .map((t) => ({ ticker: t.symbol, products: bySymbol.get(t.symbol) ?? [] }))
-      .filter((row) => row.products.length > 0);
-  }, [products, query]);
+    return TOKENS.map((t) => ({ ticker: t.symbol, products: bySymbol.get(t.symbol) ?? [] }))
+      .filter((row) => row.products.length > 0)
+      .filter(
+        (row) =>
+          !term ||
+          row.ticker.includes(term) ||
+          (names.get(row.ticker) ?? "").toUpperCase().includes(term),
+      );
+  }, [names, products, query]);
 
   return (
     <div>
@@ -41,7 +55,7 @@ export default function ProductsPage() {
 
         <div className="flex flex-wrap items-center gap-[12px]">
           <DirectionToggle value={direction} onChange={setDirection} />
-          <label className="relative">
+          <label>
             <span className="sr-only">Search ticker</span>
             <input
               value={query}
@@ -54,34 +68,43 @@ export default function ProductsPage() {
       </div>
 
       <div className="mt-[28px] overflow-hidden rounded-[16px] bg-white">
-        <div className="hidden grid-cols-[160px_140px_1fr] items-center gap-[16px] border-b border-[#E4E6E2] px-[24px] py-[14px] t-mono-sm text-dim lg:grid">
+        <div className="hidden grid-cols-[180px_140px_1fr] items-center gap-[16px] border-b border-[#E4E6E2] px-[24px] py-[14px] t-mono-sm text-dim lg:grid">
           <span>Ticker</span>
           <span>Reference</span>
           <span>Targets for this week</span>
         </div>
 
-        {loading && (
-          <div className="px-[24px] py-[32px] text-[16px] text-dim">Loading products…</div>
-        )}
+        {loading && <div className="px-[24px] py-[32px] text-[16px] text-dim">Loading products…</div>}
 
         {!loading && rows.length === 0 && (
-          <div className="px-[24px] py-[32px] text-[16px] text-dim">
-            No ticker matches “{query}”.
+          <div className="px-[24px] py-[40px]">
+            {query ? (
+              <p className="text-[16px] text-dim">No ticker matches “{query}”.</p>
+            ) : (
+              <>
+                <p className="text-[18px] text-ink">No products are open right now.</p>
+                <p className="mt-[8px] max-w-[520px] text-[15px] leading-[1.5] text-dim">
+                  The ladder for each week is published when subscriptions open on Monday.
+                </p>
+              </>
+            )}
           </div>
         )}
 
         {rows.map((row) => (
           <div
             key={row.ticker}
-            className="border-b border-[#E4E6E2] px-[24px] py-[20px] last:border-b-0 lg:grid lg:grid-cols-[160px_140px_1fr] lg:items-center lg:gap-[16px]"
+            className="border-b border-[#E4E6E2] px-[24px] py-[20px] last:border-b-0 lg:grid lg:grid-cols-[180px_140px_1fr] lg:items-center lg:gap-[16px]"
           >
             <div>
               <div className="text-[20px] leading-none tracking-[-0.02em] text-ink">{row.ticker}</div>
-              <div className="mt-[6px] text-[14px] text-dim">{tickerOf(row.ticker)?.name}</div>
+              {names.get(row.ticker) && (
+                <div className="mt-[6px] text-[14px] text-dim">{names.get(row.ticker)}</div>
+              )}
             </div>
 
-            <div className="mt-[10px] tabular text-[17px] text-ink lg:mt-0">
-              ${usd(row.products[0].referencePrice)}
+            <div className="mt-[10px] text-[17px] tabular text-ink lg:mt-0">
+              ${usd(row.products[0].reference.price)}
             </div>
 
             <div className="mt-[16px] flex flex-wrap gap-[10px] lg:mt-0">

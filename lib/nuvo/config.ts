@@ -1,69 +1,85 @@
-import type { Address, Ticker } from "./types";
+import type { Address, TokenConfig } from "./types";
 
-// Brief 12: every value here is an open question. They are placeholders, kept in
-// one file so agreeing on them later is a single edit.
+// Every address and endpoint comes from env. Nothing here is a stand-in for
+// data: if a value is missing the app says so rather than inventing it.
 
-export const MODE = (process.env.NEXT_PUBLIC_NUVO_MODE ?? "mock") as "mock" | "chain";
+const env = (name: string) => (process.env[name] ?? "").trim();
 
-// Brief: the default network is Robinhood Chain mainnet, read from env. No
-// testnet faucets, no testnet banners.
+const asAddress = (value: string): Address | undefined =>
+  /^0x[a-fA-F0-9]{40}$/.test(value) ? (value as Address) : undefined;
+
 export const NETWORK = {
-  chainId: Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 0),
-  name: process.env.NEXT_PUBLIC_CHAIN_NAME ?? "Robinhood Chain",
-  rpcUrl: process.env.NEXT_PUBLIC_RPC_URL ?? "",
-  explorerUrl: process.env.NEXT_PUBLIC_EXPLORER_URL ?? "",
-  usdg: (process.env.NEXT_PUBLIC_USDG_ADDRESS ?? "") as Address | "",
-  nuvo: (process.env.NEXT_PUBLIC_NUVO_ADDRESS ?? "") as Address | "",
+  chainId: Number(env("NEXT_PUBLIC_CHAIN_ID") || 0),
+  name: env("NEXT_PUBLIC_CHAIN_NAME") || "Robinhood Chain",
+  rpcUrl: env("NEXT_PUBLIC_RPC_URL"),
+  explorerUrl: env("NEXT_PUBLIC_EXPLORER_URL"),
+  nuvo: asAddress(env("NEXT_PUBLIC_NUVO_ADDRESS")),
 };
 
-export const USDG = { symbol: "USDG", decimals: 6 };
+export const USDG = {
+  symbol: env("NEXT_PUBLIC_USDG_SYMBOL") || "USDG",
+  address: asAddress(env("NEXT_PUBLIC_USDG_ADDRESS")),
+  /** Read from the token on first use; this is only the fallback for display. */
+  decimals: Number(env("NEXT_PUBLIC_USDG_DECIMALS") || 6),
+};
 
-/** Brief 12: the ticker list is not agreed yet. Addresses come from env. */
-export const TICKERS: Ticker[] = [
-  { symbol: "NVDA", name: "NVIDIA", uiMultiplier: 1, decimals: 18 },
-  { symbol: "TSLA", name: "Tesla", uiMultiplier: 1, decimals: 18 },
-  { symbol: "AAPL", name: "Apple", uiMultiplier: 1, decimals: 18 },
-  { symbol: "MSFT", name: "Microsoft", uiMultiplier: 1, decimals: 18 },
-  { symbol: "AMZN", name: "Amazon", uiMultiplier: 1, decimals: 18 },
-  { symbol: "GOOGL", name: "Alphabet", uiMultiplier: 1, decimals: 18 },
-  { symbol: "META", name: "Meta Platforms", uiMultiplier: 1, decimals: 18 },
-  { symbol: "COIN", name: "Coinbase", uiMultiplier: 1, decimals: 18 },
-];
+/**
+ * Tokenized stocks, from `NEXT_PUBLIC_STOCK_TOKENS`, comma separated:
+ *
+ *   NVDA:0xToken:0xChainlinkFeed, TSLA:0xToken:0xChainlinkFeed
+ *
+ * The feed is the reference the product settles on. Symbol, name, decimals and
+ * the ERC-8056 UI multiplier are read from the token itself.
+ */
+export const TOKENS: TokenConfig[] = env("NEXT_PUBLIC_STOCK_TOKENS")
+  .split(",")
+  .map((entry) => entry.trim())
+  .filter(Boolean)
+  .flatMap((entry): TokenConfig[] => {
+    const [symbol = "", token = "", feed = ""] = entry.split(":").map((part) => part.trim());
+    const address = asAddress(token);
+    if (!symbol || !address) return [];
+    return [{ symbol: symbol.toUpperCase(), address, feed: asAddress(feed) }];
+  });
 
-/** Brief 12: the ladder. Buy Low goes under the reference, Sell High over it. */
+/**
+ * The market maker quote service. It signs the premium the contract accepts, so
+ * without it products can be listed but not subscribed to.
+ */
+export const QUOTE_API = env("NEXT_PUBLIC_QUOTE_API").replace(/\/$/, "");
+
+/** Brief 1: the ladder, as a distance from the reference in percent. */
 export const LADDER = [2, 4, 6, 8] as const;
-
-/** Brief 12: limits per product, in the deposited asset. */
-export const LIMITS = {
-  minUsdg: 100,
-  maxUsdg: 50_000,
-  minStockValueUsdg: 100,
-};
 
 /** Brief 1: subscriptions run Monday open to Thursday 4:00 PM ET, expiry Friday 4:00 PM ET. */
 export const SCHEDULE = {
   timeZone: "America/New_York",
-  /** Monday, 9:30 AM ET. */
   opensAt: { weekday: 1, hour: 9, minute: 30 },
-  /** Thursday, 4:00 PM ET. */
   closesAt: { weekday: 4, hour: 16, minute: 0 },
-  /** Friday, 4:00 PM ET. */
   expiresAt: { weekday: 5, hour: 16, minute: 0 },
-  /** Brief 1: if the reference has not updated N hours after expiry, settle on the first fresh price. */
+  /** Brief 1: if the reference has not updated for this long, settlement waits for a fresh price. */
   staleReferenceHours: 6,
 };
 
-/** A quote is good for this long; after that the button asks for a refresh. */
+/** Limits per product, in the deposited asset. Zero means no limit. */
+export const LIMITS = {
+  minUsdg: Number(env("NEXT_PUBLIC_MIN_USDG") || 0),
+  maxUsdg: Number(env("NEXT_PUBLIC_MAX_USDG") || 0),
+  minStockValueUsdg: Number(env("NEXT_PUBLIC_MIN_STOCK_VALUE_USDG") || 0),
+};
+
+/** Quotes older than this have to be refreshed before subscribing. */
 export const QUOTE_TTL_MS = 30_000;
 
-/** Brief 12: the protocol revenue model is undecided; nothing is charged in the UI yet. */
-export const FEES = { spreadBps: 0, protocolFeeBps: 0 };
+export const hasNetwork = () => NETWORK.chainId > 0 && NETWORK.rpcUrl.length > 0;
+export const hasContracts = () => Boolean(NETWORK.nuvo && USDG.address);
+export const hasProducts = () => hasNetwork() && TOKENS.length > 0;
+export const hasQuotes = () => QUOTE_API.length > 0;
 
 export const explorerTx = (hash: string) =>
   NETWORK.explorerUrl ? `${NETWORK.explorerUrl.replace(/\/$/, "")}/tx/${hash}` : undefined;
 
-export const tickerOf = (symbol: string) => TICKERS.find((t) => t.symbol === symbol);
+export const explorerAddress = (address: string) =>
+  NETWORK.explorerUrl ? `${NETWORK.explorerUrl.replace(/\/$/, "")}/address/${address}` : undefined;
 
-/** ERC-8056: stock amounts are shown through the token's UI multiplier. */
-export const toUiAmount = (symbol: string, amount: number) =>
-  amount * (tickerOf(symbol)?.uiMultiplier ?? 1);
+export const tokenOf = (symbol: string) => TOKENS.find((t) => t.symbol === symbol.toUpperCase());

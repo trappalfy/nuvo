@@ -3,16 +3,15 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, use, useEffect, useMemo, useState } from "react";
-import { PriceChart } from "@/components/app/PriceChart";
 import { DirectionToggle } from "@/components/app/DirectionToggle";
+import { ReferenceScale } from "@/components/app/ReferenceScale";
 import { useWallet } from "@/components/app/AppProviders";
 import { useToast } from "@/components/app/Toaster";
 import { amountOf, apr, pct, qty, signedPct, usd } from "@/lib/format";
-import { LIMITS, MODE, USDG, explorerTx, tickerOf } from "@/lib/nuvo/config";
+import { LIMITS, USDG, explorerTx } from "@/lib/nuvo/config";
+import { quoteErrorMessage, txErrorMessage } from "@/lib/nuvo/errors";
 import { client, useNow, useNuvo } from "@/lib/nuvo/useNuvo";
-import type { Direction, Product, Quote } from "@/lib/nuvo/types";
-
-type DemoOutcome = "success" | "rejected" | "failed";
+import type { Address, Direction, Quote } from "@/lib/nuvo/types";
 
 export default function TickerPage({ params }: { params: Promise<{ ticker: string }> }) {
   const { ticker } = use(params);
@@ -30,19 +29,24 @@ function Subscribe({ symbol }: { symbol: string }) {
   const toast = useToast();
   const now = useNow();
 
-  const direction = (search.get("direction") === "sellHigh" ? "sellHigh" : "buyLow") as Direction;
+  const direction: Direction = search.get("direction") === "sellHigh" ? "sellHigh" : "buyLow";
   const step = Number(search.get("target") ?? 2);
 
   const [amount, setAmount] = useState("");
   const [quote, setQuote] = useState<Quote | undefined>(undefined);
   const [quoteLoading, setQuoteLoading] = useState(false);
+  const [quoteError, setQuoteError] = useState<string | undefined>(undefined);
   const [pending, setPending] = useState<"approve" | "subscribe" | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
-  const [demoOutcome, setDemoOutcome] = useState<DemoOutcome>("success");
 
+  const owner = wallet.address as Address | undefined;
   const { data: week } = useNuvo((c) => c.getWeek(), []);
-  const { data: products } = useNuvo((c) => c.listProducts(direction, symbol), [direction, symbol]);
-  const { data: balances } = useNuvo((c) => c.getBalances(), [wallet.address]);
+  const { data: products, loading } = useNuvo(
+    (c) => c.listProducts(direction, symbol),
+    [direction, symbol],
+  );
+  const { data: token } = useNuvo((c) => c.getToken(symbol).catch(() => undefined), [symbol]);
+  const { data: balances } = useNuvo((c) => c.getBalances(owner), [owner]);
 
   const product = useMemo(
     () => products?.find((p) => Math.abs(p.targetOffset) === Math.abs(step)) ?? products?.[0],
@@ -50,24 +54,31 @@ function Subscribe({ symbol }: { symbol: string }) {
   );
 
   const depositToken = direction === "buyLow" ? USDG.symbol : symbol;
-  const balance = balances?.[depositToken] ?? 0;
+  const stockMultiplier = token?.uiMultiplier ?? 1;
+  const depositMultiplier = direction === "buyLow" ? 1 : stockMultiplier;
+  const balance = balances?.[depositToken];
   const amountNumber = Number(amount) || 0;
 
   const { data: allowance } = useNuvo(
-    (c) => c.getAllowance(depositToken, amountNumber),
-    [depositToken, amountNumber, pending],
+    (c) => c.getAllowance(depositToken, owner),
+    [depositToken, owner, pending],
   );
 
+  const open = week ? now >= week.opensAt && now < week.closesAt : true;
   const minimum =
     direction === "buyLow"
       ? LIMITS.minUsdg
-      : Number((LIMITS.minStockValueUsdg / (product?.referencePrice ?? 1)).toFixed(4));
+      : product && LIMITS.minStockValueUsdg
+        ? LIMITS.minStockValueUsdg / product.reference.price
+        : 0;
+  const maximum = direction === "buyLow" ? LIMITS.maxUsdg : 0;
+  const premiumBps = quote?.premiumBps ?? product?.premiumBps;
 
-  // Brief 8: the outcome numbers move as the amount is typed, so they are
-  // computed locally from the same premium the quote is signed for.
+  // Brief 8: the outcome numbers move as the amount is typed. Until a premium
+  // is known they are shown without it, marked "+ premium".
   const outcomes = useMemo(() => {
-    if (!product) return undefined;
-    const r = product.premiumBps / 10_000;
+    if (!product || amountNumber <= 0) return undefined;
+    const r = (premiumBps ?? 0) / 10_000;
     return direction === "buyLow"
       ? {
           converted: { token: symbol, amount: (amountNumber * (1 + r)) / product.targetPrice },
@@ -77,23 +88,34 @@ function Subscribe({ symbol }: { symbol: string }) {
           converted: { token: USDG.symbol, amount: amountNumber * product.targetPrice * (1 + r) },
           kept: { token: symbol, amount: amountNumber * (1 + r) },
         };
-  }, [amountNumber, direction, product, symbol]);
+  }, [amountNumber, direction, premiumBps, product, symbol]);
 
-  // Quotes are fetched for a valid amount and go stale after 30s.
+  // A signed quote is fetched for each amount; it goes stale after its expiry.
   useEffect(() => {
-    if (!product || amountNumber <= 0) {
+    if (!product || amountNumber <= 0 || !client.ready.quotes) {
       setQuote(undefined);
+      setQuoteError(undefined);
+      setQuoteLoading(false);
       return;
     }
     let alive = true;
     setQuoteLoading(true);
+    setQuoteError(undefined);
     const id = setTimeout(() => {
       client
-        .getQuote(product.id, amountNumber)
-        .then((q) => alive && setQuote(q))
-        .catch(() => alive && setQuote(undefined))
-        .finally(() => alive && setQuoteLoading(false));
-    }, 250);
+        .getQuote(product, amountNumber)
+        .then((q) => {
+          if (alive) setQuote(q);
+        })
+        .catch((e) => {
+          if (!alive) return;
+          setQuote(undefined);
+          setQuoteError(quoteErrorMessage(e));
+        })
+        .finally(() => {
+          if (alive) setQuoteLoading(false);
+        });
+    }, 300);
     return () => {
       alive = false;
       clearTimeout(id);
@@ -114,37 +136,28 @@ function Subscribe({ symbol }: { symbol: string }) {
   const refreshQuote = () => {
     if (!product || amountNumber <= 0) return;
     setQuoteLoading(true);
+    setQuoteError(undefined);
     client
-      .getQuote(product.id, amountNumber)
+      .getQuote(product, amountNumber)
       .then(setQuote)
+      .catch((e) => {
+        setQuote(undefined);
+        setQuoteError(quoteErrorMessage(e));
+      })
       .finally(() => setQuoteLoading(false));
   };
 
-  const runDemoOutcome = async () => {
-    if (MODE !== "mock" || demoOutcome === "success") return;
-    await new Promise((r) => setTimeout(r, 800));
-    throw new Error(
-      demoOutcome === "rejected"
-        ? "Transaction rejected in wallet"
-        : "Transaction failed. Try again.",
-    );
-  };
+  const submitted = (title: string) => (hash: Address) =>
+    toast({ title, tone: "info", href: explorerTx(hash), linkLabel: "Explorer" });
 
   const onApprove = async () => {
-    if (!product) return;
     setError(undefined);
     setPending("approve");
     try {
-      await runDemoOutcome();
-      const tx = await client.approve(depositToken, amountNumber);
-      toast({
-        title: `${depositToken} approved`,
-        tone: "success",
-        href: explorerTx(tx.hash),
-        linkLabel: "Explorer",
-      });
+      await client.approve(depositToken, amountNumber, submitted(`Approving ${depositToken}`));
+      toast({ title: `${depositToken} approved`, tone: "success" });
     } catch (e) {
-      const message = e instanceof Error ? e.message : "Transaction failed. Try again.";
+      const message = txErrorMessage(e);
       setError(message);
       toast({ title: message, tone: "error" });
     } finally {
@@ -157,18 +170,12 @@ function Subscribe({ symbol }: { symbol: string }) {
     setError(undefined);
     setPending("subscribe");
     try {
-      await runDemoOutcome();
-      const tx = await client.subscribe(product.id, amountNumber, quote);
-      toast({
-        title: "Subscribed",
-        tone: "success",
-        href: explorerTx(tx.hash),
-        linkLabel: "Explorer",
-      });
+      const tx = await client.subscribe(product, amountNumber, quote, submitted("Subscription submitted"));
+      toast({ title: "Subscribed", tone: "success", href: explorerTx(tx.hash), linkLabel: "Explorer" });
       setAmount("");
       setQuote(undefined);
     } catch (e) {
-      const message = e instanceof Error ? e.message : "Transaction failed. Try again.";
+      const message = txErrorMessage(e);
       setError(message);
       toast({ title: message, tone: "error" });
     } finally {
@@ -178,34 +185,41 @@ function Subscribe({ symbol }: { symbol: string }) {
 
   // Brief 8: every state of the subscribe button, in order of precedence.
   const action = (() => {
-    if (week && !week.isOpen)
-      return { label: "Subscriptions are closed. Next week opens Monday.", disabled: true };
+    if (!open) return { label: "Subscriptions are closed. Next week opens Monday.", disabled: true };
     if (!wallet.isConnected) return { label: "Connect wallet", onClick: wallet.connect };
     if (!wallet.isRightNetwork) return { label: "Switch network", onClick: wallet.switchNetwork };
-    if (pending === "approve") return { label: "Confirming…", disabled: true };
-    if (pending === "subscribe") return { label: "Confirming…", disabled: true };
+    if (pending) return { label: "Confirming…", disabled: true };
     if (amountNumber <= 0) return { label: "Enter an amount", disabled: true };
-    if (amountNumber > balance)
+    if (balance !== undefined && amountNumber > balance)
       return { label: `Not enough ${depositToken} in your wallet`, disabled: true };
-    if (amountNumber < minimum)
-      return { label: `Minimum ${amountOf(depositToken, minimum)}`, disabled: true };
-    if ((allowance ?? 0) < amountNumber)
-      return { label: `Approve ${depositToken}`, onClick: onApprove };
+    if (minimum > 0 && amountNumber < minimum)
+      return { label: `Minimum ${amountOf(depositToken, minimum, depositMultiplier)}`, disabled: true };
+    if (maximum > 0 && amountNumber > maximum)
+      return { label: `Maximum ${amountOf(depositToken, maximum, depositMultiplier)}`, disabled: true };
+    if (!client.ready.contracts) return { label: "Subscriptions are not available yet", disabled: true };
+    if ((allowance ?? 0) < amountNumber) return { label: `Approve ${depositToken}`, onClick: onApprove };
+    if (!client.ready.quotes) return { label: "Quotes are unavailable right now", disabled: true };
     if (quoteLoading) return { label: "Fetching quote…", disabled: true };
-    if (!quote || staleQuote) return { label: "Refresh quote", onClick: refreshQuote };
+    if (quoteError || !quote || staleQuote) return { label: "Refresh quote", onClick: refreshQuote };
     return { label: "Subscribe", onClick: onSubscribe };
   })();
 
   if (!product) {
     return (
       <div className="py-[48px]">
-        <p className="text-[18px] text-dim">No products for {symbol} this week.</p>
-        <Link href="/app" className="t-mono mt-[16px] inline-flex text-ink hover:underline">
-          Back to products
-        </Link>
+        <p className="text-[18px] text-dim">
+          {loading ? "Loading…" : `${symbol} has no products open this week.`}
+        </p>
+        {!loading && (
+          <Link href="/app" className="t-mono mt-[16px] inline-flex text-ink hover:underline">
+            Back to products
+          </Link>
+        )}
       </div>
     );
   }
+
+  const withPremium = (text: string) => (premiumBps === undefined ? `${text} + premium` : text);
 
   return (
     <div>
@@ -219,21 +233,24 @@ function Subscribe({ symbol }: { symbol: string }) {
             <div className="flex flex-wrap items-end justify-between gap-[16px]">
               <div>
                 <h1 className="text-[32px] leading-none tracking-[-0.03em] text-ink">{symbol}</h1>
-                <p className="mt-[8px] text-[15px] text-dim">{tickerOf(symbol)?.name}</p>
+                {token?.name && token.name !== symbol && (
+                  <p className="mt-[8px] text-[15px] text-dim">{token.name}</p>
+                )}
               </div>
               <div className="text-right">
                 <div className="t-mono-sm text-dim">Chainlink reference</div>
                 <div className="mt-[8px] text-[28px] leading-none tabular text-ink">
-                  ${usd(product.referencePrice)}
+                  ${usd(product.reference.price)}
                 </div>
               </div>
             </div>
 
             <div className="mt-[24px]">
-              <PriceChart
-                ticker={symbol}
-                reference={product.referencePrice}
+              <ReferenceScale
+                reference={product.reference}
                 target={product.targetPrice}
+                direction={direction}
+                now={now}
               />
             </div>
           </section>
@@ -248,8 +265,14 @@ function Subscribe({ symbol }: { symbol: string }) {
                     : `If Friday closes at or above $${usd(product.targetPrice)}`
                 }
                 value={
-                  outcomes && amountNumber > 0
-                    ? amountOf(outcomes.converted.token, outcomes.converted.amount)
+                  outcomes
+                    ? withPremium(
+                        amountOf(
+                          outcomes.converted.token,
+                          outcomes.converted.amount,
+                          outcomes.converted.token === USDG.symbol ? 1 : stockMultiplier,
+                        ),
+                      )
                     : "—"
                 }
                 accent
@@ -257,15 +280,22 @@ function Subscribe({ symbol }: { symbol: string }) {
               <Outcome
                 label={direction === "buyLow" ? "If it closes above" : "If it closes below"}
                 value={
-                  outcomes && amountNumber > 0
-                    ? amountOf(outcomes.kept.token, outcomes.kept.amount)
+                  outcomes
+                    ? withPremium(
+                        amountOf(
+                          outcomes.kept.token,
+                          outcomes.kept.amount,
+                          outcomes.kept.token === USDG.symbol ? 1 : stockMultiplier,
+                        ),
+                      )
                     : "—"
                 }
               />
             </dl>
             <p className="mt-[16px] text-[14px] leading-[1.5] text-dim">
-              The premium of {pct(product.premiumBps)} for the week is fixed when you subscribe and
-              is paid in both outcomes. Only the asset you receive changes.
+              {premiumBps !== undefined
+                ? `The premium of ${pct(premiumBps)} for the week is fixed when you subscribe and is paid in both outcomes. Only the asset you receive changes.`
+                : "The premium is fixed when you subscribe and is paid in both outcomes. Only the asset you receive changes."}
             </p>
           </section>
 
@@ -305,7 +335,7 @@ function Subscribe({ symbol }: { symbol: string }) {
           <div className="mt-[24px]">
             <h2 className="t-mono-sm text-dim">Target price</h2>
             <div className="mt-[12px] grid grid-cols-2 gap-[8px]">
-              {products?.map((p: Product) => {
+              {products?.map((p) => {
                 const active = p.id === product.id;
                 return (
                   <button
@@ -314,16 +344,14 @@ function Subscribe({ symbol }: { symbol: string }) {
                     onClick={() => setParams({ target: Math.abs(p.targetOffset) })}
                     className={[
                       "flex flex-col gap-[6px] rounded-[8px] border px-[12px] py-[10px] text-left transition-colors duration-200",
-                      active
-                        ? "border-ink bg-page"
-                        : "border-[#E4E6E2] hover:border-ink/40",
+                      active ? "border-ink bg-page" : "border-[#E4E6E2] hover:border-ink/40",
                     ].join(" ")}
                   >
                     <span className="t-mono-sm text-dim">{signedPct(p.targetOffset)}</span>
-                    <span className="text-[17px] leading-none tabular text-ink">
-                      ${usd(p.targetPrice)}
+                    <span className="text-[17px] leading-none tabular text-ink">${usd(p.targetPrice)}</span>
+                    <span className="t-mono-sm text-lime-ink">
+                      {p.premiumBps !== undefined ? pct(p.premiumBps) : "—"}
                     </span>
-                    <span className="t-mono-sm text-lime-ink">{pct(p.premiumBps)}</span>
                   </button>
                 );
               })}
@@ -335,9 +363,12 @@ function Subscribe({ symbol }: { symbol: string }) {
               <h2 className="t-mono-sm text-dim">
                 {direction === "buyLow" ? "You deposit" : `You deposit ${symbol}`}
               </h2>
-              <span className="t-mono-sm tabular text-dim">
-                Balance {direction === "buyLow" ? usd(balance) : qty(symbol, balance)}
-              </span>
+              {balance !== undefined && (
+                <span className="t-mono-sm tabular text-dim">
+                  Balance{" "}
+                  {direction === "buyLow" ? usd(balance) : qty(balance, 4, stockMultiplier)}
+                </span>
+              )}
             </div>
             <div className="mt-[10px] flex items-center gap-[8px] rounded-[8px] border border-[#E4E6E2] px-[14px] focus-within:border-ink">
               <input
@@ -351,8 +382,9 @@ function Subscribe({ symbol }: { symbol: string }) {
               <span className="t-mono-sm text-dim">{depositToken}</span>
               <button
                 type="button"
-                onClick={() => setAmount(String(balance))}
-                className="t-mono-sm rounded-[6px] bg-nav px-[10px] py-[6px] text-ink hover:bg-nav-hover"
+                onClick={() => balance !== undefined && setAmount(String(balance))}
+                disabled={balance === undefined}
+                className="t-mono-sm rounded-[6px] bg-nav px-[10px] py-[6px] text-ink hover:bg-nav-hover disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Max
               </button>
@@ -360,12 +392,26 @@ function Subscribe({ symbol }: { symbol: string }) {
           </div>
 
           <dl className="mt-[24px] flex flex-col gap-[10px] border-t border-[#E4E6E2] pt-[20px] text-[15px]">
-            <Row label="Premium for the week" value={`${pct(product.premiumBps)} · est. ${apr(product.premiumBps)} APR`} />
+            <Row
+              label="Premium for the week"
+              value={
+                premiumBps !== undefined
+                  ? `${pct(premiumBps)} · est. ${apr(premiumBps)} APR`
+                  : "Quoted on entry"
+              }
+            />
             <Row
               label="Premium amount"
-              value={amountNumber > 0 ? amountOf(depositToken, (amountNumber * product.premiumBps) / 10_000) : "—"}
+              value={
+                amountNumber > 0 && premiumBps !== undefined
+                  ? amountOf(depositToken, (amountNumber * premiumBps) / 10_000, depositMultiplier)
+                  : "—"
+              }
             />
-            <Row label="Settles" value={week ? `${week.label.replace("Week of ", "")}, Friday 4:00 PM ET` : "—"} />
+            <Row
+              label="Settles"
+              value={week ? `${week.label.replace("Week of ", "")}, Friday 4:00 PM ET` : "—"}
+            />
           </dl>
 
           <button
@@ -373,7 +419,7 @@ function Subscribe({ symbol }: { symbol: string }) {
             onClick={action.onClick}
             disabled={action.disabled || !action.onClick}
             className={[
-              "mt-[24px] flex h-[52px] w-full items-center justify-center rounded-[8px] px-[16px] t-mono transition-colors duration-200",
+              "mt-[24px] flex min-h-[52px] w-full items-center justify-center rounded-[8px] px-[16px] py-[12px] text-center t-mono transition-colors duration-200",
               action.disabled || !action.onClick
                 ? "cursor-not-allowed bg-nav text-dim"
                 : "bg-ink text-white hover:bg-ink-hover",
@@ -382,27 +428,14 @@ function Subscribe({ symbol }: { symbol: string }) {
             {action.label}
           </button>
 
-          {error && <p className="mt-[12px] text-[14px] text-[#8A3B2F]">{error}</p>}
+          {(error || quoteError) && (
+            <p className="mt-[12px] text-[14px] text-[#8A3B2F]">{error ?? quoteError}</p>
+          )}
 
-          {quote && !staleQuote && (
+          {quote && !staleQuote && !quoteLoading && (
             <p className="mt-[12px] t-mono-sm text-dim">
               Quote good for {Math.max(0, Math.ceil((quote.expiresAt - now) / 1000))}s
             </p>
-          )}
-
-          {MODE === "mock" && (
-            <label className="mt-[20px] flex items-center justify-between gap-[8px] border-t border-[#E4E6E2] pt-[16px] t-mono-sm text-dim">
-              Demo: next transaction
-              <select
-                value={demoOutcome}
-                onChange={(e) => setDemoOutcome(e.target.value as DemoOutcome)}
-                className="rounded-[6px] border border-[#E4E6E2] bg-white px-[8px] py-[6px] text-ink"
-              >
-                <option value="success">succeeds</option>
-                <option value="rejected">rejected in wallet</option>
-                <option value="failed">fails</option>
-              </select>
-            </label>
           )}
         </aside>
       </div>
@@ -426,7 +459,7 @@ function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline justify-between gap-[16px]">
       <dt className="text-dim">{label}</dt>
-      <dd className="tabular text-ink">{value}</dd>
+      <dd className="text-right tabular text-ink">{value}</dd>
     </div>
   );
 }

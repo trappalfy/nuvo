@@ -17,11 +17,11 @@ export function TargetChip({ product, className }: { product: Product; className
       ].join(" ")}
     >
       <span className="t-mono-sm text-dim">{signedPct(product.targetOffset)}</span>
-      <span className="text-[18px] leading-none tabular text-ink">
-        ${usd(product.targetPrice)}
-      </span>
+      <span className="text-[18px] leading-none tabular text-ink">${usd(product.targetPrice)}</span>
       <span className="t-mono-sm text-lime-ink">
-        {pct(product.premiumBps)} · est. {apr(product.premiumBps)} APR
+        {product.premiumBps !== undefined
+          ? `${pct(product.premiumBps)} · est. ${apr(product.premiumBps)} APR`
+          : "Premium quoted on entry"}
       </span>
     </Link>
   );

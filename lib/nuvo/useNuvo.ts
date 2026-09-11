@@ -1,16 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { getClient, isMock } from "./client";
-import type { NuvoClient } from "./types";
+import type { ChainClient } from "./chain";
+import { getClient } from "./client";
 
-// One place where screens read from the client. Mock writes (subscribe, claim,
-// the week fast forward) push a change through onChange, so every mounted screen
-// repaints without a manual refresh.
+// One place where screens read from the client. A write that lands, or a wallet
+// that changes, pushes through onChange so every mounted screen re-reads.
 
 export const client = getClient();
 
-export function useNuvo<T>(load: (client: NuvoClient) => Promise<T>, deps: unknown[] = []) {
+export function useNuvo<T>(load: (client: ChainClient) => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -18,9 +17,7 @@ export function useNuvo<T>(load: (client: NuvoClient) => Promise<T>, deps: unkno
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
 
-  useEffect(() => {
-    if (isMock(client)) return client.onChange(refresh);
-  }, [refresh]);
+  useEffect(() => client.onChange(refresh), [refresh]);
 
   useEffect(() => {
     let alive = true;
@@ -33,6 +30,7 @@ export function useNuvo<T>(load: (client: NuvoClient) => Promise<T>, deps: unkno
       })
       .catch((e: unknown) => {
         if (!alive) return;
+        setData(undefined);
         setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => {
@@ -47,7 +45,7 @@ export function useNuvo<T>(load: (client: NuvoClient) => Promise<T>, deps: unkno
   return { data, loading, error, refresh };
 }
 
-/** Ticks once a second, for the countdown in the week strip. */
+/** Ticks once a second, for countdowns and quote expiry. */
 export function useNow(intervalMs = 1000) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {

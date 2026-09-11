@@ -13,8 +13,8 @@ export default function TermsPage() {
         </Link>
         <h1 className="t-claim mt-[56px] max-w-[700px] text-ink">Terms of use</h1>
         <p className="mt-[24px] max-w-[700px] text-[19px] leading-[1.55] text-dim">
-          Placeholder. The terms are drafted outside this repository and will replace this page
-          before launch.
+          The terms of use are being finalised and will be published here before subscriptions
+          open.
         </p>
         <Link href="/" className="t-mono mt-[40px] inline-flex text-ink hover:underline">
           Back to the site

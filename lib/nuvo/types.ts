@@ -1,70 +1,76 @@
-// Brief 9: the shape the UI talks to. The chain client and the mock client both
-// implement NuvoClient, so screens never learn which one they are on.
+// The shape the screens read. One implementation, ChainClient, backed by the
+// network and the contracts from env.
 
 export type Direction = "buyLow" | "sellHigh";
 
-export type ProductStatus = "open" | "locked" | "settled";
-
 export type Address = `0x${string}`;
 
-export type Ticker = {
+/** A tokenized stock, as configured in env. */
+export type TokenConfig = {
   symbol: string;
+  address: Address;
+  /** Chainlink feed the product settles on. */
+  feed?: Address;
+};
+
+/** What the token contract itself reports. */
+export type TokenInfo = {
+  symbol: string;
+  address: Address;
   name: string;
-  /** Tokenized stock address, from env. Empty until the network config is filled in. */
-  address?: Address;
-  /** ERC-8056: stock amounts are shown multiplied by this. */
-  uiMultiplier: number;
   decimals: number;
+  /** ERC-8056: amounts are shown multiplied by this. */
+  uiMultiplier: number;
 };
 
 export type Week = {
-  /** Monday of the trading week, ISO date in ET. */
+  /** ISO date of the Monday in ET. Also the id the product ids are derived from. */
   id: string;
   /** "Week of Sep 14–18" */
   label: string;
-  /** Subscriptions open, Monday market open. */
   opensAt: number;
-  /** Subscriptions close, Thursday 4:00 PM ET. */
   closesAt: number;
-  /** Expiry, Friday 4:00 PM ET. */
   expiresAt: number;
-  /** Whether subscriptions are open right now. */
   isOpen: boolean;
 };
 
+export type ProductStatus = "open" | "locked" | "settled";
+
+export type Reference = {
+  price: number;
+  updatedAt: number;
+  /** True when the feed has not updated inside the window from the config. */
+  stale: boolean;
+};
+
 export type Product = {
-  id: string;
+  /** bytes32, derived in abi.ts and matched by the contract. */
+  id: Address;
   weekId: string;
   ticker: string;
   direction: Direction;
-  /** Target price, in USDG. */
   targetPrice: number;
-  /** Distance from the reference, in percent: -2 for Buy Low -2%. */
+  /** Distance from the reference in percent: -2 for Buy Low -2%. */
   targetOffset: number;
-  /** Chainlink reference at the time the ladder was built. */
-  referencePrice: number;
-  /** Premium for the week, in basis points. */
-  premiumBps: number;
+  reference: Reference;
+  /** From the quote service. Undefined while it has no premium for this rung. */
+  premiumBps?: number;
   expiresAt: number;
   status: ProductStatus;
-  /** Chainlink reference at settlement, once it exists. */
   settlePrice?: number;
 };
 
 export type Quote = {
-  productId: string;
-  /** Amount the quote was made for: USDG for Buy Low, stock for Sell High. */
+  productId: Address;
   amount: number;
   premiumBps: number;
-  /** Premium in the deposited asset. */
   premiumAmount: number;
-  /** What the position pays out if the target is reached. */
+  /** Payout if the reference reaches the target. */
   ifConverted: { token: string; amount: number };
-  /** What it pays out if it is not. */
+  /** Payout if it does not. */
   ifNot: { token: string; amount: number };
-  /** Signed market maker quote. The mock generates it; the quote service will later. */
-  signature: `0x${string}`;
-  /** Quotes older than this are stale and the button asks for a refresh. */
+  /** Market maker signature the contract verifies. */
+  signature: Address;
   expiresAt: number;
 };
 
@@ -72,44 +78,41 @@ export type PositionStatus = "active" | "claimable" | "claimed";
 
 export type Position = {
   id: string;
-  productId: string;
-  weekId: string;
+  productId: Address;
   ticker: string;
   direction: Direction;
   targetPrice: number;
   premiumBps: number;
-  /** Deposited amount, in the deposited asset. */
   amount: number;
   depositToken: string;
   subscribedAt: number;
   expiresAt: number;
   status: PositionStatus;
-  /** Set once the week has settled. */
   settlement?: {
     settlePrice: number;
     converted: boolean;
     payout: { token: string; amount: number };
-    claimedAt?: number;
   };
 };
 
 export type TxResult = {
-  hash: `0x${string}`;
+  hash: Address;
   explorerUrl?: string;
 };
 
-// Brief 9: the client the screens use.
 export interface NuvoClient {
-  readonly mode: "mock" | "chain";
+  /** Reads that need the network, and writes that need the contracts. */
+  readonly ready: { network: boolean; contracts: boolean; products: boolean; quotes: boolean };
   getWeek(): Promise<Week>;
+  getToken(symbol: string): Promise<TokenInfo>;
   listProducts(direction: Direction, ticker?: string): Promise<Product[]>;
-  getQuote(productId: string, amount: number): Promise<Quote>;
+  getQuote(product: Product, amount: number): Promise<Quote>;
   getBalances(address?: Address): Promise<Record<string, number>>;
-  getAllowance(token: string, amount: number): Promise<number>;
-  approve(token: string, amount: number): Promise<TxResult>;
-  subscribe(productId: string, amount: number, quote: Quote): Promise<TxResult & { positionId: string }>;
+  getAllowance(symbol: string, owner?: Address): Promise<number>;
+  approve(symbol: string, amount: number): Promise<TxResult>;
+  subscribe(product: Product, amount: number, quote: Quote): Promise<TxResult>;
   getPositions(address?: Address): Promise<Position[]>;
   claim(positionId: string): Promise<TxResult>;
-  /** Mock only: jump to the next week so settlement and Claim can be reviewed. */
-  fastForwardWeek?(): Promise<void>;
+  /** Screens repaint on this after a write lands. */
+  onChange(listener: () => void): () => void;
 }

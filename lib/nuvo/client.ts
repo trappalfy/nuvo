@@ -1,17 +1,10 @@
-import { MODE } from "./config";
 import { ChainClient } from "./chain";
-import { MockClient } from "./mock";
-import type { NuvoClient } from "./types";
 
-// Brief 9: NEXT_PUBLIC_NUVO_MODE picks the implementation. Screens import
-// getClient() and never branch on the mode themselves, except to show the
-// `Demo data` badge and the developer week control.
+// One client for the whole app, backed by the network and contracts from env.
 
-let instance: NuvoClient | null = null;
+let instance: ChainClient | null = null;
 
-export function getClient(): NuvoClient {
-  if (!instance) instance = MODE === "chain" ? new ChainClient() : new MockClient();
+export function getClient(): ChainClient {
+  if (!instance) instance = new ChainClient();
   return instance;
 }
-
-export const isMock = (client: NuvoClient): client is MockClient => client.mode === "mock";

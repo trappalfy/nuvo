@@ -1,26 +1,9 @@
-// Brief 9: a draft of the contract interface, so the next stage matches the UI
-// that already exists. Types and a draft ABI only — no contracts in this repo.
-// When the contracts land, edits belong here and in chain.ts, nowhere else.
-//
-// interface INuvoDual {
-//     enum Direction { BuyLow, SellHigh }
-//     enum Status { Open, Locked, Settled }
-//
-//     function subscribe(bytes32 productId, uint256 amount, bytes calldata signedQuote)
-//         external returns (uint256 positionId);
-//     function claim(uint256 positionId) external returns (address token, uint256 amount);
-//
-//     function product(bytes32 productId) external view returns (
-//         bytes32 ticker, Direction direction, uint256 targetPrice,
-//         uint64 expiry, Status status, int256 settlePrice
-//     );
-//     function positionsOf(address user) external view returns (uint256[] memory);
-//
-//     event Subscribed(uint256 indexed positionId, address indexed user, bytes32 indexed productId,
-//         uint256 amount, uint256 premiumBps);
-//     event Settled(bytes32 indexed productId, int256 settlePrice, bool converted);
-//     event Claimed(uint256 indexed positionId, address token, uint256 amount);
-// }
+import { keccak256, encodePacked } from "viem";
+import type { Direction } from "./types";
+
+// The contract surface the app talks to. The contracts are not deployed yet, so
+// this is the agreed shape: the UI is written against it, and the contract stage
+// has to match it. Edits belong here and in chain.ts, nowhere else.
 
 /** On-chain direction enum. */
 export const DirectionEnum = { BuyLow: 0, SellHigh: 1 } as const;
@@ -28,20 +11,30 @@ export const DirectionEnum = { BuyLow: 0, SellHigh: 1 } as const;
 /** On-chain product status enum. */
 export const StatusEnum = { Open: 0, Locked: 1, Settled: 2 } as const;
 
-export type OnChainProduct = {
-  ticker: `0x${string}`;
-  direction: (typeof DirectionEnum)[keyof typeof DirectionEnum];
-  targetPrice: bigint;
-  expiry: bigint;
-  status: (typeof StatusEnum)[keyof typeof StatusEnum];
-  settlePrice: bigint;
-};
+/** On-chain position status enum. */
+export const PositionStatusEnum = { Open: 0, Settled: 1, Claimed: 2 } as const;
+
+export const directionIndex = (direction: Direction) =>
+  direction === "buyLow" ? DirectionEnum.BuyLow : DirectionEnum.SellHigh;
 
 /**
- * Draft. Not deployed, not verified, not audited — the shape the UI expects, so
- * the contract stage has something to converge on. `signedQuote` is the market
- * maker signature the quote service will issue; MockClient fakes it today.
+ * How a product id is derived. The app builds ids locally so the ladder can be
+ * rendered before any of it is touched on chain; the contract must derive them
+ * the same way or `product(productId)` will miss.
+ *
+ * keccak256(abi.encodePacked(weekId, ticker, direction, targetBps))
+ *
+ * weekId is the ISO date of the Monday in ET ("2026-09-14"), targetBps is the
+ * distance from the reference in basis points (200 for 2%).
  */
+export const productId = (weekId: string, ticker: string, direction: Direction, targetBps: number) =>
+  keccak256(
+    encodePacked(
+      ["string", "string", "uint8", "uint16"],
+      [weekId, ticker, directionIndex(direction), targetBps],
+    ),
+  );
+
 export const nuvoDualAbi = [
   {
     type: "function",
@@ -85,6 +78,25 @@ export const nuvoDualAbi = [
     inputs: [{ name: "user", type: "address" }],
     outputs: [{ name: "", type: "uint256[]" }],
   },
+  // Added for the app: positionsOf gives ids, the screens need the position
+  // itself, and the payout has to be readable before Claim is pressed.
+  {
+    type: "function",
+    name: "position",
+    stateMutability: "view",
+    inputs: [{ name: "positionId", type: "uint256" }],
+    outputs: [
+      { name: "user", type: "address" },
+      { name: "productId", type: "bytes32" },
+      { name: "amount", type: "uint256" },
+      { name: "premiumBps", type: "uint256" },
+      { name: "status", type: "uint8" },
+      { name: "depositToken", type: "address" },
+      { name: "payoutToken", type: "address" },
+      { name: "payoutAmount", type: "uint256" },
+      { name: "subscribedAt", type: "uint64" },
+    ],
+  },
   {
     type: "event",
     name: "Subscribed",
@@ -116,7 +128,7 @@ export const nuvoDualAbi = [
   },
 ] as const;
 
-/** Minimal ERC-20 surface the app needs: balances, allowance, approve. */
+/** Minimal ERC-20 surface the app needs. */
 export const erc20Abi = [
   {
     type: "function",
@@ -152,6 +164,20 @@ export const erc20Abi = [
     inputs: [],
     outputs: [{ name: "", type: "uint8" }],
   },
+  {
+    type: "function",
+    name: "symbol",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "string" }],
+  },
+  {
+    type: "function",
+    name: "name",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "string" }],
+  },
   // ERC-8056: stock amounts are displayed through this multiplier.
   {
     type: "function",
@@ -159,5 +185,29 @@ export const erc20Abi = [
     stateMutability: "view",
     inputs: [],
     outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+/** Chainlink AggregatorV3Interface — the reference the product settles on. */
+export const aggregatorV3Abi = [
+  {
+    type: "function",
+    name: "decimals",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint8" }],
+  },
+  {
+    type: "function",
+    name: "latestRoundData",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "roundId", type: "uint80" },
+      { name: "answer", type: "int256" },
+      { name: "startedAt", type: "uint256" },
+      { name: "updatedAt", type: "uint256" },
+      { name: "answeredInRound", type: "uint80" },
+    ],
   },
 ] as const;

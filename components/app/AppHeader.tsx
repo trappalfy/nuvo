@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { usd } from "@/lib/format";
-import { MODE, USDG } from "@/lib/nuvo/config";
+import { USDG } from "@/lib/nuvo/config";
+import type { Address } from "@/lib/nuvo/types";
 import { useNuvo } from "@/lib/nuvo/useNuvo";
 import { shortAddress } from "@/lib/wallet/config";
 import { Lockup } from "../ui/Mark";
@@ -14,12 +15,16 @@ const NAV = [
   { label: "Positions", href: "/app/positions" },
 ];
 
-// Brief 8: the app header. Lockup back to the site, two sections, wallet on the
-// right, and the `Demo data` plate while the client is the mock.
+// Brief 8: the app header. Lockup back to the site, two sections, the wallet on
+// the right — its address and USDG balance once connected.
 export function AppHeader() {
   const pathname = usePathname();
   const wallet = useWallet();
-  const { data: balances } = useNuvo((c) => c.getBalances(), [wallet.address]);
+  const { data: balances } = useNuvo(
+    (c) => c.getBalances(wallet.address as Address | undefined),
+    [wallet.address],
+  );
+  const usdg = balances?.[USDG.symbol];
 
   return (
     <header className="sticky top-0 z-40 border-b border-[#E4E6E2] bg-page/90 backdrop-blur-md">
@@ -36,46 +41,39 @@ export function AppHeader() {
           </nav>
         </div>
 
-        <div className="flex items-center gap-[10px]">
-          {MODE === "mock" && (
-            <span className="hidden h-[38px] items-center gap-[8px] rounded-[6px] bg-nav px-[12px] t-mono-sm text-ink sm:inline-flex">
-              <span className="block size-[8px] bg-lime-ink" aria-hidden="true" />
-              Demo data
-            </span>
-          )}
-
-          {!wallet.isConnected ? (
-            <button
-              type="button"
-              onClick={wallet.connect}
-              className="inline-flex h-[44px] items-center rounded-[8px] bg-ink px-[18px] t-mono text-white transition-colors duration-200 hover:bg-ink-hover"
-            >
-              Connect wallet
-            </button>
-          ) : !wallet.isRightNetwork ? (
-            <button
-              type="button"
-              onClick={wallet.switchNetwork}
-              className="inline-flex h-[44px] items-center rounded-[8px] bg-[#3A2422] px-[18px] t-mono text-white"
-            >
-              Switch network
-            </button>
-          ) : (
-            <div className="flex items-center gap-[8px]">
+        {!wallet.isConnected ? (
+          <button
+            type="button"
+            onClick={wallet.connect}
+            className="inline-flex h-[44px] items-center rounded-[8px] bg-ink px-[18px] t-mono text-white transition-colors duration-200 hover:bg-ink-hover"
+          >
+            Connect wallet
+          </button>
+        ) : !wallet.isRightNetwork ? (
+          <button
+            type="button"
+            onClick={wallet.switchNetwork}
+            className="inline-flex h-[44px] items-center rounded-[8px] bg-[#3A2422] px-[18px] t-mono text-white"
+          >
+            Switch network
+          </button>
+        ) : (
+          <div className="flex items-center gap-[8px]">
+            {usdg !== undefined && (
               <span className="hidden h-[44px] items-center rounded-[8px] border border-[#E4E6E2] bg-white px-[14px] t-mono tabular text-ink sm:inline-flex">
-                {usd(balances?.[USDG.symbol] ?? 0)} {USDG.symbol}
+                {usd(usdg)} {USDG.symbol}
               </span>
-              <button
-                type="button"
-                onClick={wallet.disconnect}
-                title="Disconnect"
-                className="inline-flex h-[44px] items-center rounded-[8px] bg-nav px-[14px] t-mono text-ink transition-colors duration-200 hover:bg-nav-hover"
-              >
-                {shortAddress(wallet.address)}
-              </button>
-            </div>
-          )}
-        </div>
+            )}
+            <button
+              type="button"
+              onClick={wallet.disconnect}
+              title="Disconnect"
+              className="inline-flex h-[44px] items-center rounded-[8px] bg-nav px-[14px] t-mono text-ink transition-colors duration-200 hover:bg-nav-hover"
+            >
+              {shortAddress(wallet.address)}
+            </button>
+          </div>
+        )}
       </div>
 
       <nav className="container-nuvo flex items-center gap-[2px] pb-[10px] sm:hidden">
@@ -87,15 +85,7 @@ export function AppHeader() {
   );
 }
 
-function NavLink({
-  href,
-  label,
-  pathname,
-}: {
-  href: string;
-  label: string;
-  pathname: string;
-}) {
+function NavLink({ href, label, pathname }: { href: string; label: string; pathname: string }) {
   const active = href === "/app" ? pathname === "/app" : pathname.startsWith(href);
   return (
     <Link

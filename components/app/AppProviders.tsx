@@ -3,22 +3,21 @@
 import "@rainbow-me/rainbowkit/styles.css";
 import { RainbowKitProvider, lightTheme, useConnectModal } from "@rainbow-me/rainbowkit";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { WagmiProvider, useAccount, useChainId, useDisconnect } from "wagmi";
-import { MODE, NETWORK } from "@/lib/nuvo/config";
-import { robinhoodChain, wagmiConfig } from "@/lib/wallet/config";
+import { createContext, useContext, useEffect, useMemo } from "react";
+import type { WalletClient } from "viem";
+import { WagmiProvider, useAccount, useDisconnect, useSwitchChain, useWalletClient } from "wagmi";
+import { NETWORK, hasNetwork } from "@/lib/nuvo/config";
+import type { Address } from "@/lib/nuvo/types";
+import { client } from "@/lib/nuvo/useNuvo";
+import { nuvoChain } from "@/lib/wallet/chain";
+import { wagmiConfig } from "@/lib/wallet/config";
 
-// The wallet the screens see. In chain mode it is wagmi; in mock mode it is a
-// demo connection, so the whole path from brief 11.3 can be walked without a
-// wallet extension installed.
-
-const DEMO_ADDRESS = "0xD3f0A4C7b1F92E5d8a0b6C4e9F1a2B3c4D5e6F70";
-const DEMO_KEY = "nuvo.mock.wallet";
+// The wallet the screens see: the account connected through RainbowKit, and
+// whether it sits on the network the contracts live on.
 
 type WalletState = {
-  address?: string;
+  address?: Address;
   isConnected: boolean;
-  /** False when the wallet is on another network. Always true in mock mode. */
   isRightNetwork: boolean;
   connect: () => void;
   disconnect: () => void;
@@ -37,50 +36,29 @@ const queryClient = new QueryClient();
 
 function WalletBridge({ children }: { children: React.ReactNode }) {
   const { openConnectModal } = useConnectModal();
-  const { address, isConnected } = useAccount();
-  const chainId = useChainId();
+  const { address, isConnected, chainId } = useAccount();
   const { disconnect } = useDisconnect();
-  const [demoConnected, setDemoConnected] = useState(false);
+  const { switchChain } = useSwitchChain();
+  const { data: walletClient } = useWalletClient();
 
+  // The data layer signs with whatever wallet is connected right now.
   useEffect(() => {
-    if (MODE !== "mock") return;
-    try {
-      setDemoConnected(window.localStorage.getItem(DEMO_KEY) === "1");
-    } catch {
-      // Private windows just start disconnected.
-    }
-  }, []);
+    client.setWallet((walletClient as WalletClient | undefined) ?? null, address);
+  }, [walletClient, address]);
 
-  const setDemo = useCallback((next: boolean) => {
-    setDemoConnected(next);
-    try {
-      window.localStorage.setItem(DEMO_KEY, next ? "1" : "0");
-    } catch {
-      // Not worth failing the click over.
-    }
-  }, []);
+  const isRightNetwork = !isConnected || !hasNetwork() || chainId === NETWORK.chainId;
 
-  const value = useMemo<WalletState>(() => {
-    if (MODE === "mock") {
-      return {
-        address: demoConnected ? DEMO_ADDRESS : undefined,
-        isConnected: demoConnected,
-        isRightNetwork: true,
-        connect: () => setDemo(true),
-        disconnect: () => setDemo(false),
-        switchNetwork: () => {},
-      };
-    }
-    return {
+  const value = useMemo<WalletState>(
+    () => ({
       address,
       isConnected,
-      isRightNetwork: !isConnected || chainId === robinhoodChain.id,
+      isRightNetwork,
       connect: () => openConnectModal?.(),
       disconnect: () => disconnect(),
-      // TODO(stage 2): wagmi switchChain once the network parameters are in env.
-      switchNetwork: () => openConnectModal?.(),
-    };
-  }, [address, chainId, demoConnected, disconnect, isConnected, openConnectModal, setDemo]);
+      switchNetwork: () => switchChain({ chainId: nuvoChain.id }),
+    }),
+    [address, disconnect, isConnected, isRightNetwork, openConnectModal, switchChain],
+  );
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;
 }
@@ -91,7 +69,10 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
       <QueryClientProvider client={queryClient}>
         <RainbowKitProvider
           theme={lightTheme({ accentColor: "#222F30", borderRadius: "small" })}
-          appInfo={{ appName: `Nuvo on ${NETWORK.name}` }}
+          appInfo={{ appName: "Nuvo" }}
+          initialChain={nuvoChain}
+          // The app is in English; without this the modal follows the browser locale.
+          locale="en-US"
         >
           <WalletBridge>{children}</WalletBridge>
         </RainbowKitProvider>

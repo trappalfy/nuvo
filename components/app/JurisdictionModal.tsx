@@ -7,7 +7,7 @@ import { AnimatePresence, motion } from "motion/react";
 const ACK_KEY = "nuvo.ack.v1";
 
 // Brief 8: first visit to the app asks for a jurisdiction and risk acknowledgement.
-// Brief 12: the wording is an open question — this is placeholder copy.
+// Brief 12: the final wording comes from legal review; this is the working copy.
 export function JurisdictionModal() {
   const [open, setOpen] = useState(false);
 
@@ -70,7 +70,6 @@ export function JurisdictionModal() {
                 </Link>
                 .
               </p>
-              <p className="t-mono-sm text-dim">Placeholder copy, pending legal review.</p>
             </div>
 
             <div className="mt-[28px] flex flex-col gap-[12px] sm:flex-row sm:items-center">

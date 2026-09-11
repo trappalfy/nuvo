@@ -6,9 +6,10 @@ import { useWallet } from "@/components/app/AppProviders";
 import { useToast } from "@/components/app/Toaster";
 import { amountOf, pct, usd } from "@/lib/format";
 import { explorerTx } from "@/lib/nuvo/config";
+import { txErrorMessage } from "@/lib/nuvo/errors";
 import { etLabel } from "@/lib/nuvo/schedule";
 import { client, useNuvo } from "@/lib/nuvo/useNuvo";
-import type { Position } from "@/lib/nuvo/types";
+import type { Address, Position } from "@/lib/nuvo/types";
 
 const TABS = [
   { id: "active", label: "Active" },
@@ -24,18 +25,25 @@ export default function PositionsPage() {
   const [claiming, setClaiming] = useState<string | null>(null);
   const wallet = useWallet();
   const toast = useToast();
-  const { data: positions, loading } = useNuvo((c) => c.getPositions(wallet.address as `0x${string}`), [
-    wallet.address,
-  ]);
+  const { data: positions, loading } = useNuvo(
+    (c) => c.getPositions(wallet.address as Address | undefined),
+    [wallet.address],
+  );
 
   const shown = (positions ?? []).filter((p) =>
-    tab === "active" ? p.status === "active" : tab === "settled" ? p.status === "claimable" : p.status === "claimed",
+    tab === "active"
+      ? p.status === "active"
+      : tab === "settled"
+        ? p.status === "claimable"
+        : p.status === "claimed",
   );
 
   const claim = async (position: Position) => {
     setClaiming(position.id);
     try {
-      const tx = await client.claim(position.id);
+      const tx = await client.claim(position.id, (hash) =>
+        toast({ title: "Claim submitted", tone: "info", href: explorerTx(hash), linkLabel: "Explorer" }),
+      );
       toast({
         title: `Claimed ${amountOf(position.settlement!.payout.token, position.settlement!.payout.amount)}`,
         tone: "success",
@@ -43,10 +51,7 @@ export default function PositionsPage() {
         linkLabel: "Explorer",
       });
     } catch (e) {
-      toast({
-        title: e instanceof Error ? e.message : "Transaction failed. Try again.",
-        tone: "error",
-      });
+      toast({ title: txErrorMessage(e), tone: "error" });
     } finally {
       setClaiming(null);
     }
@@ -75,7 +80,16 @@ export default function PositionsPage() {
       </div>
 
       {!wallet.isConnected && (
-        <p className="mt-[28px] text-[16px] text-dim">Connect your wallet to see your positions.</p>
+        <div className="mt-[28px] rounded-[16px] bg-white p-[32px]">
+          <p className="text-[18px] text-ink">Connect your wallet to see your positions.</p>
+          <button
+            type="button"
+            onClick={wallet.connect}
+            className="t-mono mt-[20px] inline-flex h-[44px] items-center rounded-[8px] bg-ink px-[18px] text-white hover:bg-ink-hover"
+          >
+            Connect wallet
+          </button>
+        </div>
       )}
 
       {wallet.isConnected && loading && (
@@ -95,63 +109,61 @@ export default function PositionsPage() {
       )}
 
       <div className="mt-[28px] flex flex-col gap-[12px]">
-        {shown.map((position) => (
-          <article key={position.id} className="rounded-[16px] bg-white p-[24px]">
-            <div className="flex flex-wrap items-start justify-between gap-[16px]">
-              <div className="flex items-center gap-[12px]">
-                <span
-                  className={`block size-[10px] rounded-[2px] ${position.direction === "buyLow" ? "bg-lime" : "bg-sand"}`}
-                  aria-hidden="true"
-                />
-                <div>
-                  <h2 className="text-[22px] leading-none tracking-[-0.02em] text-ink">
-                    {position.ticker}
-                  </h2>
-                  <p className="mt-[8px] t-mono-sm text-dim">
-                    {position.direction === "buyLow" ? "Buy Low" : "Sell High"} · target $
-                    {usd(position.targetPrice)} · {pct(position.premiumBps)} for the week
-                  </p>
+        {wallet.isConnected &&
+          shown.map((position) => (
+            <article key={position.id} className="rounded-[16px] bg-white p-[24px]">
+              <div className="flex flex-wrap items-start justify-between gap-[16px]">
+                <div className="flex items-center gap-[12px]">
+                  <span
+                    className={`block size-[10px] rounded-[2px] ${position.direction === "buyLow" ? "bg-lime" : "bg-sand"}`}
+                    aria-hidden="true"
+                  />
+                  <div>
+                    <h2 className="text-[22px] leading-none tracking-[-0.02em] text-ink">
+                      {position.ticker}
+                    </h2>
+                    <p className="mt-[8px] t-mono-sm text-dim">
+                      {position.direction === "buyLow" ? "Buy Low" : "Sell High"} · target $
+                      {usd(position.targetPrice)} · {pct(position.premiumBps)} for the week
+                    </p>
+                  </div>
                 </div>
+
+                {position.status === "claimable" && position.settlement && (
+                  <button
+                    type="button"
+                    onClick={() => claim(position)}
+                    disabled={claiming === position.id}
+                    className="inline-flex h-[44px] items-center rounded-[8px] bg-ink px-[18px] t-mono text-white transition-colors duration-200 hover:bg-ink-hover disabled:cursor-not-allowed disabled:bg-nav disabled:text-dim"
+                  >
+                    {claiming === position.id ? "Confirming…" : "Claim"}
+                  </button>
+                )}
               </div>
 
-              {position.status === "claimable" && position.settlement && (
-                <button
-                  type="button"
-                  onClick={() => claim(position)}
-                  disabled={claiming === position.id}
-                  className="inline-flex h-[44px] items-center rounded-[8px] bg-ink px-[18px] t-mono text-white transition-colors duration-200 hover:bg-ink-hover disabled:cursor-not-allowed disabled:bg-nav disabled:text-dim"
-                >
-                  {claiming === position.id ? "Confirming…" : "Claim"}
-                </button>
-              )}
-            </div>
-
-            <dl className="mt-[20px] grid gap-[16px] border-t border-[#E4E6E2] pt-[20px] sm:grid-cols-3">
-              <Cell label="Deposited" value={amountOf(position.depositToken, position.amount)} />
-              {position.settlement ? (
-                <>
-                  <Cell
-                    label="Settled at"
-                    value={`$${usd(position.settlement.settlePrice)}`}
-                    hint={position.settlement.converted ? "Converted" : "Not converted"}
-                  />
-                  <Cell
-                    label={position.status === "claimed" ? "Claimed" : "To claim"}
-                    value={amountOf(
-                      position.settlement.payout.token,
-                      position.settlement.payout.amount,
-                    )}
-                  />
-                </>
-              ) : (
-                <>
-                  <Cell label="Expires" value={`${etLabel(position.expiresAt)} ET`} />
-                  <Cell label="Status" value="Locked until settlement" />
-                </>
-              )}
-            </dl>
-          </article>
-        ))}
+              <dl className="mt-[20px] grid gap-[16px] border-t border-[#E4E6E2] pt-[20px] sm:grid-cols-3">
+                <Cell label="Deposited" value={amountOf(position.depositToken, position.amount)} />
+                {position.settlement ? (
+                  <>
+                    <Cell
+                      label="Settled at"
+                      value={`$${usd(position.settlement.settlePrice)}`}
+                      hint={position.settlement.converted ? "Converted" : "Not converted"}
+                    />
+                    <Cell
+                      label={position.status === "claimed" ? "Claimed" : "To claim"}
+                      value={amountOf(position.settlement.payout.token, position.settlement.payout.amount)}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <Cell label="Expires" value={`${etLabel(position.expiresAt)} ET`} />
+                    <Cell label="Status" value="Locked until settlement" />
+                  </>
+                )}
+              </dl>
+            </article>
+          ))}
       </div>
     </div>
   );
