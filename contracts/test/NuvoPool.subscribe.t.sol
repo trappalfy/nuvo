@@ -63,6 +63,13 @@ contract PoolSubscribeTest is Test {
             })
         );
 
+        // These suites test the pool itself, not who is let in.
+        {
+            address o_ = pool.owner();
+            vm.prank(o_);
+            pool.setAllowlist(false);
+        }
+
         usdg.mint(lp, 1_000_000e6);
         stock.mint(lp, 10_000e18);
         usdg.mint(user, 100_000e6);
@@ -200,6 +207,13 @@ contract PoolSubscribeTest is Test {
                 maxLockedShareBps: 8_000
             })
         );
+
+        // These suites test the pool itself, not who is let in.
+        {
+            address o_ = tight.owner();
+            vm.prank(o_);
+            tight.setAllowlist(false);
+        }
 
         // 100 USDG и 100 токенов по $100: стоимость 10 100
         vm.startPrank(lp);

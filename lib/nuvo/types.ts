@@ -104,6 +104,8 @@ export type PoolStats = {
    * refuse the transaction — better to say so than to let it revert.
    */
   priceOk: boolean;
+  /** Whether this wallet may deposit at all: the pool can be invite-only. */
+  canEnter: boolean;
   paused: boolean;
 };
 
@@ -163,6 +165,7 @@ export interface NuvoClient {
   getOwed(address?: Address): Promise<OwedBalance[]>;
   withdrawOwed(id: string): Promise<TxResult>;
   getPoolStats(ticker: string, address?: Address): Promise<PoolStats>;
+  canEnter(ticker: string, address?: Address): Promise<boolean>;
   addLiquidity(ticker: string, usdgAmount: string, tokenAmount: string): Promise<TxResult>;
   removeLiquidity(ticker: string, shares: bigint): Promise<TxResult>;
   /** Screens repaint on this after a write lands. */

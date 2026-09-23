@@ -60,6 +60,13 @@ contract PoolInvariants is Test {
             })
         );
 
+        // These suites test the pool itself, not who is let in.
+        {
+            address o_ = pool.owner();
+            vm.prank(o_);
+            pool.setAllowlist(false);
+        }
+
         handler = new PoolHandler(pool, usdg, stock, feed, factory, schedule);
         targetContract(address(handler));
     }

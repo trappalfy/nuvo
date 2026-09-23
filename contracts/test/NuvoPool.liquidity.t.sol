@@ -55,6 +55,13 @@ contract PoolLiquidityTest is Test {
             })
         );
 
+        // These suites test the pool itself, not who is let in.
+        {
+            address o_ = pool.owner();
+            vm.prank(o_);
+            pool.setAllowlist(false);
+        }
+
         usdg.mint(lp1, 1_000_000e6);
         usdg.mint(lp2, 1_000_000e6);
         stock.mint(lp1, 1_000e18);

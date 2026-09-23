@@ -63,6 +63,13 @@ contract PoolClaimTest is Test {
             })
         );
 
+        // These suites test the pool itself, not who is let in.
+        {
+            address o_ = pool.owner();
+            vm.prank(o_);
+            pool.setAllowlist(false);
+        }
+
         usdg.mint(lp, 1_000_000e6);
         stock.mint(lp, 10_000e18);
         usdg.mint(user, 100_000e6);

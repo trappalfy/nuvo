@@ -111,9 +111,11 @@ export default function PoolPage() {
                 stats
                   ? stats.paused
                     ? "Deposits paused"
-                    : stats.priceOk
-                      ? "Open"
-                      : "Waiting for a price"
+                    : !stats.canEnter
+                      ? "Invite-only"
+                      : stats.priceOk
+                        ? "Open"
+                        : "Waiting for a price"
                   : "—"
               }
             />
@@ -160,8 +162,14 @@ export default function PoolPage() {
               label="Deposit"
               busy={pending === "add"}
               onClick={onAdd}
-              disabled={stats ? stats.paused || !stats.priceOk : true}
+              disabled={stats ? stats.paused || !stats.priceOk || !stats.canEnter : true}
             />
+            {stats && !stats.canEnter && (
+              <p className="text-[14px] leading-[1.5] text-dim">
+                This pool is invite-only while it is young. Your wallet is not on the list yet, so
+                deposits are closed to it — anything already deposited can still be withdrawn.
+              </p>
+            )}
             {stats && !stats.priceOk && (
               <p className="text-[14px] leading-[1.5] text-dim">
                 The reference price is not fresh enough right now, so the pool will not take a

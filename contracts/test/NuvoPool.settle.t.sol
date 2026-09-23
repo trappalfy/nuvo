@@ -53,6 +53,13 @@ contract PoolSettleTest is Test {
                 maxLockedShareBps: 8_000
             })
         );
+
+        // These suites test the pool itself, not who is let in.
+        {
+            address o_ = pool.owner();
+            vm.prank(o_);
+            pool.setAllowlist(false);
+        }
     }
 
     function test_rejectsBeforeTheExpiry() public {

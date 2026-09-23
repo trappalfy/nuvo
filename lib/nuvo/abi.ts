@@ -241,6 +241,23 @@ export const nuvoPoolAbi = [
       { name: "updatedAt", type: "uint256" },
     ],
   },
+  // The allowlist: while it is on, only the addresses on it may deposit or
+  // subscribe. Reading it is how the screen says so instead of letting the
+  // transaction fail.
+  {
+    type: "function",
+    name: "allowlistOn",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    type: "function",
+    name: "allowed",
+    stateMutability: "view",
+    inputs: [{ name: "who", type: "address" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
   {
     type: "function",
     name: "maxPriceAgeSettle",
@@ -271,6 +288,7 @@ export const nuvoPoolAbi = [
   { type: "error", name: "AlreadyClaimed", inputs: [] },
   { type: "error", name: "NotYours", inputs: [] },
   { type: "error", name: "NothingOwed", inputs: [] },
+  { type: "error", name: "NotOnList", inputs: [] },
   { type: "error", name: "Unavailable", inputs: [{ name: "code", type: "uint8" }] },
   {
     type: "event",

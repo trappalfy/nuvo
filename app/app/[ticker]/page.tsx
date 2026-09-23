@@ -51,6 +51,12 @@ function Subscribe({ symbol }: { symbol: string }) {
   );
   const { data: tickers } = useNuvo((c) => c.listTickers(), []);
   const { data: balances } = useNuvo((c) => c.getBalances(owner), [owner]);
+  // A young pool is invite-only. Say so on the button rather than let the
+  // wallet open for a transaction the pool will refuse.
+  const { data: mayEnter } = useNuvo(
+    (c) => (symbol ? c.canEnter(symbol, owner) : Promise.resolve(true)),
+    [symbol, owner],
+  );
 
   const info = tickers?.find((t) => t.symbol === symbol);
   const product = useMemo(
@@ -188,6 +194,7 @@ function Subscribe({ symbol }: { symbol: string }) {
     if (balance !== undefined && amountNumber > balance)
       return { label: `Not enough ${depositToken} in your wallet`, disabled: true };
     if (client.ready.contracts) {
+      if (mayEnter === false) return { label: "This pool is invite-only", disabled: true };
       if ((allowance ?? 0) < amountNumber)
         return { label: `Approve ${depositToken}`, onClick: onApprove };
       if (termsLoading) return { label: "Reading the pool…", disabled: true };

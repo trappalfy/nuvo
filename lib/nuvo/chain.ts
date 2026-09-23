@@ -541,6 +541,33 @@ export class ChainClient implements NuvoClient {
    * back to work — and the payout is then recorded here instead of being sent.
    * Without this the money is on chain and invisible.
    */
+  /**
+   * Whether this wallet may deposit or subscribe. A pool starts invite-only, so
+   * a stranger would otherwise meet a reverted transaction where a sentence
+   * would do.
+   */
+  async canEnter(ticker: string, address?: Address): Promise<boolean> {
+    const pool = await this.poolFor(ticker);
+    return this.poolAccess(pool.address, address ?? this.account);
+  }
+
+  private async poolAccess(pool: Address, who?: Address): Promise<boolean> {
+    const client = this.reader();
+    const on = await client.readContract({
+      address: pool,
+      abi: nuvoPoolAbi,
+      functionName: "allowlistOn",
+    });
+    if (!on) return true;
+    if (!who) return false;
+    return client.readContract({
+      address: pool,
+      abi: nuvoPoolAbi,
+      functionName: "allowed",
+      args: [who],
+    });
+  }
+
   async getOwed(address?: Address): Promise<OwedBalance[]> {
     const owner = address ?? this.account;
     if (!owner || !hasContracts()) return [];
@@ -614,6 +641,8 @@ export class ChainClient implements NuvoClient {
       client.readContract({ address: pool.address, abi: nuvoPoolAbi, functionName: "paused" }),
     ]);
 
+    const canEnter = await this.poolAccess(pool.address, owner);
+
     // A feed that is dead or stale makes the pool refuse both sides of the
     // depositor's screen. Reading it must not take the whole screen down.
     const priceOk = await Promise.all([
@@ -641,6 +670,7 @@ export class ChainClient implements NuvoClient {
       withdrawableUsdg:
         total > 0n ? priceOf((value * shares) / total < free ? (value * shares) / total : free) : 0,
       priceOk,
+      canEnter,
       paused,
     };
   }

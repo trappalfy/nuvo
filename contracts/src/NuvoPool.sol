@@ -138,6 +138,11 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
     mapping(uint64 => uint256) public openAt;
     uint256 public pendingSettled;
 
+    /// @notice Список допущенных. Пока включён, внутрь пускают только тех, кто
+    ///         в нём: вклад и подписка. На выход список не влияет ничем.
+    mapping(address => bool) public allowed;
+    bool public allowlistOn;
+
     /// @notice Выплата, закрытая без перевода: ждёт владельца.
     mapping(address => mapping(address => uint256)) public owed;
 
@@ -179,6 +184,7 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
     error TooHigh();
     error TooEarly();
     error NothingPending();
+    error NotOnList();
     error SettlementPending();
     error UseSchedule();
     error NothingOwed();
@@ -199,6 +205,8 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
     event FeesWithdrawn(address indexed to, uint256 usdgAmount, uint256 tokenAmount);
     event PausedSet(bool paused, address by);
     event GuardianSet(address guardian);
+    event AllowlistSet(bool on);
+    event AllowedSet(address indexed who, bool ok);
     event ModelScheduled(address model, uint256 eta);
     event ModelSet(address model);
     event FeeSet(uint16 bps);
@@ -233,6 +241,12 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
             p.maxExpiryLockValueWad,
             p.maxLockedShareBps
         );
+        // Пул рождается закрытым. Между деплоем и настройкой нет окна, в котором
+        // внутрь может зайти кто угодно; владелец в списке с первой секунды.
+        allowlistOn = true;
+        allowed[p.owner] = true;
+        emit AllowlistSet(true);
+        emit AllowedSet(p.owner, true);
         emit GuardianSet(p.guardian);
     }
 
@@ -290,6 +304,7 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
         returns (uint256 shares)
     {
         if (paused) revert Paused();
+        _checkList();
         // Пока по рассчитанной неделе не забраны выплаты, будущее движение
         // инвентаря уже предрешено и в стоимости пая не отражено. Вход в этот
         // момент — это вход в известный исход за чужой счёт.
@@ -374,6 +389,7 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
         uint64 deadline
     ) external nonReentrant returns (uint256 id) {
         if (block.timestamp > deadline) revert Expired();
+        _checkList();
 
         Preview memory p = _quote(direction, distanceBps, amount);
         if (p.code != CODE_OK) revert Unavailable(p.code);
@@ -819,6 +835,27 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
     function unpause() external onlyOwner {
         paused = false;
         emit PausedSet(false, msg.sender);
+    }
+
+    /// @dev Стоит только на входе. Выплата, вывод пая и расчёт его не проходят:
+    ///      список, закрывающий выход, запирал бы чужие деньги.
+    function _checkList() internal view {
+        if (allowlistOn && !allowed[msg.sender]) revert NotOnList();
+    }
+
+    /// @notice Впустить или убрать из списка. Убранный по-прежнему забирает своё.
+    function setAllowed(address[] calldata who, bool ok) external onlyOwner {
+        for (uint256 i = 0; i < who.length; i++) {
+            allowed[who[i]] = ok;
+            emit AllowedSet(who[i], ok);
+        }
+    }
+
+    /// @notice Снять список — открыть пул всем. Включить обратно можно, но уже
+    ///         вошедших это не выгоняет: их доля и позиции остаются их.
+    function setAllowlist(bool on) external onlyOwner {
+        allowlistOn = on;
+        emit AllowlistSet(on);
     }
 
     function setGuardian(address who) external onlyOwner {

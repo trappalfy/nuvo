@@ -62,6 +62,13 @@ contract PoolReviewTest is Test {
             })
         );
 
+        // These suites test the pool itself, not who is let in.
+        {
+            address o_ = pool.owner();
+            vm.prank(o_);
+            pool.setAllowlist(false);
+        }
+
         for (uint256 i = 0; i < 4; i++) {
             address who = [lp, raider, user, stranger][i];
             usdg.mint(who, 1_000_000e6);

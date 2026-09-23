@@ -39,6 +39,16 @@ and from the pools.
     node script/expiries.mjs 26       # the expiry calendar for addExpiries
     bash script/rehearse.sh           # a whole week on a throwaway local chain
 
+### Who may enter
+
+A pool is born invite-only: `allowlistOn` is set in the constructor and the
+owner is on the list from the first second, so there is no window between the
+deployment and the configuration in which anyone can walk in. The check sits on
+`addLiquidity` and `subscribe` only — claiming, withdrawing a share, settling
+and `withdrawOwed` are never gated, because a list that closes the exit would
+lock other people's money in. The owner opens the pool with
+`setAllowlist(false)`.
+
 ### Rehearsing the deployment
 
 `script/rehearse.sh` runs the real `script/Deploy.s.sol`, with the same env the

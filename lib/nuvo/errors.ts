@@ -25,6 +25,7 @@ const CONTRACT_ERRORS: Record<string, string> = {
   AlreadyClaimed: "This position has already been claimed.",
   NotYours: "This position belongs to another wallet.",
   NothingOwed: "There is nothing left to withdraw here.",
+  NotOnList: "This pool is invite-only right now.",
 };
 
 export function txErrorMessage(error: unknown): string {
