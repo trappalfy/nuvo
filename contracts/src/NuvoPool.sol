@@ -384,6 +384,121 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
         return _positions.length;
     }
 
+    // --- выплата ---
+
+    function claim(uint256 id) external nonReentrant returns (address asset, uint256 amount) {
+        Position storage p = _positions[id];
+        if (p.owner != msg.sender) revert NotYours();
+        if (p.claimed) revert AlreadyClaimed();
+        uint256 price = settlePriceWad[p.expiry];
+        if (price == 0) revert NotSettled();
+        p.claimed = true;
+
+        bool converted = p.direction == BUY_LOW ? price <= p.strikeWad : price >= p.strikeWad;
+
+        // Оба замка снимаются, дальше один уходит на выплату, другой — в свободное.
+        lockedUsdg -= p.lockUsdg;
+        lockedToken -= p.lockToken;
+
+        uint256 premium;
+        bool premiumInUsdg;
+
+        if (p.direction == BUY_LOW) {
+            depositsUsdg -= p.deposit;
+            if (converted) {
+                // пул отдаёт акцию и оставляет себе USDG подписчика
+                asset = address(token);
+                amount = p.lockToken;
+                freeUsdg += p.lockUsdg + p.deposit;
+                premium = p.lockToken - _converted(BUY_LOW, p.deposit, p.strikeWad, 0);
+                token.safeTransfer(msg.sender, amount);
+            } else {
+                asset = address(usdg);
+                amount = p.deposit + p.lockUsdg;
+                freeToken += p.lockToken;
+                premium = p.lockUsdg;
+                premiumInUsdg = true;
+                usdg.safeTransfer(msg.sender, amount);
+            }
+        } else {
+            depositsToken -= p.deposit;
+            if (converted) {
+                // пул забирает акцию и платит USDG по страйку
+                asset = address(usdg);
+                amount = p.lockUsdg;
+                freeToken += p.lockToken + p.deposit;
+                premium = p.lockUsdg - _converted(SELL_HIGH, p.deposit, p.strikeWad, 0);
+                premiumInUsdg = true;
+                usdg.safeTransfer(msg.sender, amount);
+            } else {
+                asset = address(token);
+                amount = p.deposit + p.lockToken;
+                freeUsdg += p.lockUsdg;
+                premium = p.lockToken;
+                token.safeTransfer(msg.sender, amount);
+            }
+        }
+
+        _takeFee(premiumInUsdg, premium);
+        emit Claimed(id, msg.sender, asset, amount, converted);
+    }
+
+    /// @notice Что выплатится по позиции. Экран позиций показывает это до нажатия Claim.
+    function positionPayout(uint256 id)
+        external
+        view
+        returns (bool settled, bool converted, address asset, uint256 amount)
+    {
+        Position memory p = _positions[id];
+        uint256 price = settlePriceWad[p.expiry];
+        if (price == 0) return (false, false, address(0), 0);
+        settled = true;
+        converted = p.direction == BUY_LOW ? price <= p.strikeWad : price >= p.strikeWad;
+        if (p.direction == BUY_LOW) {
+            return converted
+                ? (true, true, address(token), p.lockToken)
+                : (true, false, address(usdg), p.deposit + p.lockUsdg);
+        }
+        return converted
+            ? (true, true, address(usdg), p.lockUsdg)
+            : (true, false, address(token), p.deposit + p.lockToken);
+    }
+
+    /// @dev Комиссия — доля от премии, которую заплатил пул, и берётся она из
+    ///      инвентарной части, уже пополненной к этому моменту. Депозит
+    ///      подписчика и его выплата комиссией не затрагиваются.
+    function _takeFee(bool inUsdg, uint256 premium) internal {
+        uint16 f = feeBps;
+        if (f == 0 || premium == 0) return;
+        uint256 fee = (premium * f) / BPS;
+        if (inUsdg) {
+            if (fee > freeUsdg) fee = freeUsdg;
+            freeUsdg -= fee;
+            feesUsdg += fee;
+        } else {
+            if (fee > freeToken) fee = freeToken;
+            freeToken -= fee;
+            feesToken += fee;
+        }
+    }
+
+    function setFeeBps(uint16 bps) external onlyOwner {
+        if (bps > MAX_FEE_BPS) revert TooHigh();
+        feeBps = bps;
+        emit FeeSet(bps);
+    }
+
+    /// @notice Единственное, что владелец может вывести из пула.
+    function withdrawFees(address to) external onlyOwner {
+        uint256 u = feesUsdg;
+        uint256 t = feesToken;
+        feesUsdg = 0;
+        feesToken = 0;
+        if (u > 0) usdg.safeTransfer(to, u);
+        if (t > 0) token.safeTransfer(to, t);
+        emit FeesWithdrawn(to, u, t);
+    }
+
     // --- расчёт недели ---
 
     /// @notice Рассчитать экспирацию по текущему раунду фида. Открыто всем.
