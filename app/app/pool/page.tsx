@@ -100,11 +100,27 @@ export default function PoolPage() {
           <dl className="mt-[16px] flex flex-col gap-[10px] text-[15px]">
             <Row label="Pool value" value={stats ? `$${usd(stats.valueUsdg)}` : "—"} />
             <Row label="Free right now" value={stats ? `$${usd(stats.freeUsdg)}` : "—"} />
-            <Row label="Your share" value={stats ? `$${usd(stats.myValueUsdg)}` : "—"} />
-            <Row label="Status" value={stats ? (stats.paused ? "Deposits paused" : "Open") : "—"} />
+            <Row label="Your share" value={stats ? `${usd(stats.myValueUsdg)}` : "—"} />
+            <Row
+              label="Yours to withdraw now"
+              value={stats ? `${usd(stats.withdrawableUsdg)}` : "—"}
+            />
+            <Row
+              label="Status"
+              value={
+                stats
+                  ? stats.paused
+                    ? "Deposits paused"
+                    : stats.priceOk
+                      ? "Open"
+                      : "Waiting for a price"
+                  : "—"
+              }
+            />
           </dl>
           <p className="mt-[16px] text-[14px] leading-[1.5] text-dim">
-            Network fees on {NETWORK.name} are paid in ETH.
+            Your share is priced off the reference; the part reserved against open positions
+            cannot be withdrawn until they settle. Network fees on {NETWORK.name} are paid in ETH.
           </p>
         </section>
 
@@ -140,7 +156,18 @@ export default function PoolPage() {
                 onClick={() => onApprove(active, tokenIn)}
               />
             )}
-            <Button label="Deposit" busy={pending === "add"} onClick={onAdd} />
+            <Button
+              label="Deposit"
+              busy={pending === "add"}
+              onClick={onAdd}
+              disabled={stats ? stats.paused || !stats.priceOk : true}
+            />
+            {stats && !stats.priceOk && (
+              <p className="text-[14px] leading-[1.5] text-dim">
+                The reference price is not fresh enough right now, so the pool will not take a
+                deposit or pay a withdrawal. It reopens when the feed updates.
+              </p>
+            )}
           </div>
 
           <h2 className="t-mono-sm mt-[28px] border-t border-[#E4E6E2] pt-[20px] text-dim">
@@ -156,11 +183,13 @@ export default function PoolPage() {
               label="Half"
               busy={pending === "remove"}
               onClick={() => stats && onRemove(stats.shares / 2n)}
+              disabled={stats ? !stats.priceOk || stats.shares === 0n : true}
             />
             <Button
               label="All"
               busy={pending === "remove"}
               onClick={() => stats && onRemove(stats.shares)}
+              disabled={stats ? !stats.priceOk || stats.shares === 0n : true}
             />
           </div>
         </aside>
@@ -222,12 +251,22 @@ function Field({
   );
 }
 
-function Button({ label, busy, onClick }: { label: string; busy: boolean; onClick: () => void }) {
+function Button({
+  label,
+  busy,
+  onClick,
+  disabled,
+}: {
+  label: string;
+  busy: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
-      disabled={busy || !client.ready.contracts}
+      disabled={busy || disabled || !client.ready.contracts}
       className="flex min-h-[48px] w-full items-center justify-center rounded-[8px] bg-ink px-[16px] t-mono text-white transition-colors duration-200 hover:bg-ink-hover disabled:cursor-not-allowed disabled:bg-nav disabled:text-dim"
     >
       {busy ? "Confirming…" : label}

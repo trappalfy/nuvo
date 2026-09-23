@@ -243,6 +243,13 @@ export const nuvoPoolAbi = [
   },
   {
     type: "function",
+    name: "maxPriceAgeSettle",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint64" }],
+  },
+  {
+    type: "function",
     name: "pendingSettled",
     stateMutability: "view",
     inputs: [],

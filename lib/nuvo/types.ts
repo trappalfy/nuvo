@@ -94,8 +94,16 @@ export type PoolStats = {
   freeUsdg: number;
   shares: bigint;
   totalShares: bigint;
-  /** The depositor's share, in USDG. */
+  /** The depositor's share, in USDG — including the part reserved against open positions. */
   myValueUsdg: number;
+  /** Of that share, what the pool can actually pay out right now. */
+  withdrawableUsdg: number;
+  /**
+   * Whether the reference price is good enough for a deposit or a withdrawal.
+   * Both are priced off the feed, so a dead or stale one means the pool will
+   * refuse the transaction — better to say so than to let it revert.
+   */
+  priceOk: boolean;
   paused: boolean;
 };
 

@@ -614,6 +614,19 @@ export class ChainClient implements NuvoClient {
       client.readContract({ address: pool.address, abi: nuvoPoolAbi, functionName: "paused" }),
     ]);
 
+    // A feed that is dead or stale makes the pool refuse both sides of the
+    // depositor's screen. Reading it must not take the whole screen down.
+    const priceOk = await Promise.all([
+      client.readContract({ address: pool.address, abi: nuvoPoolAbi, functionName: "priceWad" }),
+      client.readContract({
+        address: pool.address,
+        abi: nuvoPoolAbi,
+        functionName: "maxPriceAgeSettle",
+      }),
+    ])
+      .then(([[, updatedAt], maxAge]) => BigInt(Math.floor(Date.now() / 1000)) <= updatedAt + maxAge)
+      .catch(() => false);
+
     return {
       pool: pool.address,
       ticker: pool.token.symbol,
@@ -622,6 +635,9 @@ export class ChainClient implements NuvoClient {
       shares,
       totalShares: total,
       myValueUsdg: total > 0n ? priceOf((value * shares) / total) : 0,
+      withdrawableUsdg:
+        total > 0n ? priceOf((value * shares) / total < free ? (value * shares) / total : free) : 0,
+      priceOk,
       paused,
     };
   }
