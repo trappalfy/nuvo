@@ -91,6 +91,9 @@ async function send(address, functionName, args) {
   const hash = await wallet.writeContract(request);
   const receipt = await pub.waitForTransactionReceipt({ hash });
   if (receipt.status !== "success") throw new Error(`reverted on chain: ${hash}`);
+  // What it cost, so the key's balance can be kept ahead of the year.
+  const spent = receipt.gasUsed * receipt.effectiveGasPrice;
+  console.log(`    gas ${receipt.gasUsed} at ${receipt.effectiveGasPrice} wei = ${spent} wei`);
   return hash;
 }
 
