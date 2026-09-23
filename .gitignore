@@ -21,3 +21,6 @@ contracts/broadcast/*/31337/
 
 # The devnet process id: local runtime, not history.
 contracts/.devnet.pid
+
+# Simulation output. Real deployments keep their record, dry runs do not.
+contracts/broadcast/*/*/dry-run/
