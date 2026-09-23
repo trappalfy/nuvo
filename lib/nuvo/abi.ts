@@ -211,6 +211,39 @@ export const nuvoPoolAbi = [
   { type: "function", name: "freeToken", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
   { type: "function", name: "paused", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "bool" }] },
   {
+    type: "function",
+    name: "priceWad",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "price", type: "uint256" },
+      { name: "updatedAt", type: "uint256" },
+    ],
+  },
+  {
+    type: "function",
+    name: "pendingSettled",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  // The pool's own errors, so a failed transaction can say what happened
+  // instead of "try again".
+  { type: "error", name: "SettlementPending", inputs: [] },
+  { type: "error", name: "InventoryLocked", inputs: [] },
+  { type: "error", name: "StalePrice", inputs: [] },
+  { type: "error", name: "BadPrice", inputs: [] },
+  { type: "error", name: "Slippage", inputs: [] },
+  { type: "error", name: "StrikeMoved", inputs: [] },
+  { type: "error", name: "Expired", inputs: [] },
+  { type: "error", name: "TooSmall", inputs: [] },
+  { type: "error", name: "BadShares", inputs: [] },
+  { type: "error", name: "Paused", inputs: [] },
+  { type: "error", name: "NotSettled", inputs: [] },
+  { type: "error", name: "AlreadyClaimed", inputs: [] },
+  { type: "error", name: "NotYours", inputs: [] },
+  { type: "error", name: "Unavailable", inputs: [{ name: "code", type: "uint8" }] },
+  {
     type: "event",
     name: "Subscribed",
     inputs: [

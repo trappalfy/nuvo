@@ -72,6 +72,8 @@ export class TxRevertedError extends Error {
   }
 }
 
+const WAD = 10n ** 18n;
+
 /** Typed text, cut to the token's decimals so it never rounds up. */
 const toBase = (amount: string, decimals: number) => {
   const [whole = "", fraction = ""] = (amount || "0").trim().split(".");
@@ -565,6 +567,30 @@ export class ChainClient implements NuvoClient {
     };
   }
 
+  /**
+   * The pool takes a floor on what a deposit or a withdrawal must return. Sent
+   * as zero it would accept any price, so both are derived from the pool's own
+   * figures read a moment earlier, with a tolerance.
+   */
+  private static readonly LP_TOLERANCE_BPS = 100n;
+
+  private async poolFigures(pool: Address) {
+    const client = this.reader();
+    const [value, free, total, freeUsdgAmount, freeTokenAmount, price] = await Promise.all([
+      client.readContract({ address: pool, abi: nuvoPoolAbi, functionName: "poolValueWad" }),
+      client.readContract({ address: pool, abi: nuvoPoolAbi, functionName: "freeValueWad" }),
+      client.readContract({ address: pool, abi: nuvoPoolAbi, functionName: "totalShares" }),
+      client.readContract({ address: pool, abi: nuvoPoolAbi, functionName: "freeUsdg" }),
+      client.readContract({ address: pool, abi: nuvoPoolAbi, functionName: "freeToken" }),
+      client.readContract({ address: pool, abi: nuvoPoolAbi, functionName: "priceWad" }),
+    ]);
+    return { value, free, total, freeUsdgAmount, freeTokenAmount, price: price[0] };
+  }
+
+  private static floor(amount: bigint) {
+    return (amount * (10_000n - ChainClient.LP_TOLERANCE_BPS)) / 10_000n;
+  }
+
   async addLiquidity(
     ticker: string,
     usdgAmount: string,
@@ -574,15 +600,20 @@ export class ChainClient implements NuvoClient {
     const { wallet, account } = this.writer();
     const pool = await this.poolFor(ticker);
     const usdg = await this.usdgToken();
+    const usdgIn = toBase(usdgAmount || "0", usdg.decimals);
+    const tokenIn = toBase(tokenAmount || "0", pool.token.decimals);
+
+    const { value, total, price } = await this.poolFigures(pool.address);
+    const addWad =
+      usdgIn * 10n ** BigInt(18 - usdg.decimals) +
+      (tokenIn * 10n ** BigInt(18 - pool.token.decimals) * price) / WAD;
+    const expected = total > 0n && value > 0n ? (addWad * total) / value : addWad;
+
     const hash = await wallet.writeContract({
       address: pool.address,
       abi: nuvoPoolAbi,
       functionName: "addLiquidity",
-      args: [
-        toBase(usdgAmount || "0", usdg.decimals),
-        toBase(tokenAmount || "0", pool.token.decimals),
-        0n,
-      ],
+      args: [usdgIn, tokenIn, ChainClient.floor(expected)],
       account,
       chain: nuvoChain,
     });
@@ -596,11 +627,21 @@ export class ChainClient implements NuvoClient {
   ): Promise<TxResult> {
     const { wallet, account } = this.writer();
     const pool = await this.poolFor(ticker);
+    const { value, free, total, freeUsdgAmount, freeTokenAmount } = await this.poolFigures(
+      pool.address,
+    );
+
+    // The same arithmetic the pool does, so the floors are the payout the
+    // depositor was shown rather than a guess.
+    const owedWad = total > 0n ? (value * shares) / total : 0n;
+    const minUsdg = free > 0n ? ChainClient.floor((freeUsdgAmount * owedWad) / free) : 0n;
+    const minToken = free > 0n ? ChainClient.floor((freeTokenAmount * owedWad) / free) : 0n;
+
     const hash = await wallet.writeContract({
       address: pool.address,
       abi: nuvoPoolAbi,
       functionName: "removeLiquidity",
-      args: [shares, 0n, 0n],
+      args: [shares, minUsdg, minToken],
       account,
       chain: nuvoChain,
     });

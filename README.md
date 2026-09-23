@@ -38,6 +38,25 @@ and from the pools.
     cd contracts && forge test        # the whole suite; the fork run skips without RPC_URL
     node script/expiries.mjs 26       # the expiry calendar for addExpiries
 
+### Settling a week
+
+`settle(expiry)` is open to anyone and is the normal path: from Friday's close
+until the feed moves again on Monday it takes the price that was in effect at the
+bell. Run it shortly after the close.
+
+If it is missed and the feed has already moved on, `settle` refuses — the latest
+round is no longer the one that was in effect. Recover with the round that was:
+
+    cast call $POOL "findSettleRound(uint64,uint80,uint16)(uint80,bool)" $EXPIRY $LATEST_ROUND 64
+    cast send $POOL "settleWithRound(uint64,uint80)" $EXPIRY $ROUND
+
+Until a week is settled its positions cannot be claimed, so do not leave it. A
+position still unclaimed a day after its expiry can be closed by anyone with
+`resolve(id)`: the payout is recorded as a debt the owner withdraws later, and
+the depositors' inventory goes back to work. Deposits and withdrawals to the pool
+are closed while a settled week is still unclaimed — that is what keeps a
+latecomer from buying into an outcome that is already decided.
+
 The launch order, the roles and the limits are in
 `docs/superpowers/specs/2026-09-23-nuvo-protocol-design.md`. The interface the UI
 calls is in `lib/nuvo/abi.ts`. Prices are 8-decimal fixed point from Chainlink,

@@ -255,11 +255,11 @@ contract PoolClaimTest is Test {
         pool.setFeeBps(100);
     }
 
-    function test_claimWorksAfterOwnershipIsRenounced() public {
+    function test_claimWorksWhilePaused() public {
         uint256 id = _buyLow();
         _settleAt(99e8);
         vm.prank(owner);
-        pool.renounceOwnership();
+        pool.pause();
         vm.prank(user);
         (, uint256 amount) = pool.claim(id);
         assertEq(amount, 1_012e6, "nothing an admin does can hold a payout");

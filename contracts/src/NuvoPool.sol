@@ -32,6 +32,8 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
     /// @notice Смена модели премий вступает в силу не раньше этого срока.
     uint256 public constant MODEL_DELAY = 2 days;
     uint16 public constant MAX_FEE_BPS = 2_000;
+    /// @notice Через столько после экспирации позицию может закрыть кто угодно.
+    uint64 public constant RESOLVE_DELAY = 1 days;
     /// @notice Доля, которая остаётся в пуле навсегда: не даёт обнулить масштаб пая.
     uint256 internal constant FLOOR_SHARES = 1e15;
 
@@ -130,6 +132,27 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
     mapping(uint64 => uint256) public settlePriceWad;
     mapping(uint64 => uint256) public lockedValueAt;
 
+    /// @notice Открытые позиции по каждой экспирации и сколько их всего ждёт
+    ///         выплаты по уже рассчитанным неделям. Пока это число не ноль,
+    ///         стоимость пая известна не до конца, и вклады с выводами закрыты.
+    mapping(uint64 => uint256) public openAt;
+    uint256 public pendingSettled;
+
+    /// @notice Выплата, закрытая без перевода: ждёт владельца.
+    mapping(address => mapping(address => uint256)) public owed;
+
+    struct Limits {
+        uint64 maxPriceAge;
+        uint64 maxPriceAgeSettle;
+        uint256 minDepositValueWad;
+        uint256 maxPositionValueWad;
+        uint256 maxExpiryLockValueWad;
+        uint16 maxLockedShareBps;
+    }
+
+    Limits public pendingLimits;
+    uint256 public pendingLimitsEta;
+
     Position[] internal _positions;
     mapping(address => uint256[]) internal _byOwner;
 
@@ -156,6 +179,9 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
     error TooHigh();
     error TooEarly();
     error NothingPending();
+    error SettlementPending();
+    error UseSchedule();
+    error NothingOwed();
 
     event LiquidityAdded(address indexed lp, uint256 usdgIn, uint256 tokenIn, uint256 shares);
     event LiquidityRemoved(address indexed lp, uint256 usdgOut, uint256 tokenOut, uint256 shares);
@@ -220,11 +246,22 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
         updatedAt = at;
     }
 
-    /// @dev Цена, пригодная для подписки и для оценки пая.
+    /// @dev Цена, пригодная для подписки. Порог широкий, потому что подписка
+    ///      открыта круглосуточно, а фид стоит по выходным и в праздники.
     function _freshPrice() internal view returns (uint256 price) {
         uint256 at;
         (price, at) = priceWad();
         if (block.timestamp > at + maxPriceAge) revert StalePrice();
+    }
+
+    /// @dev Цена, пригодная для оценки пая. Порог тот же, что у расчёта:
+    ///      вопрос один и тот же — отражает ли цена рынок прямо сейчас.
+    ///      Широкий порог подписки здесь не годится: по нему вкладчик,
+    ///      пришедший в выходные, забрал бы понедельничный разрыв у остальных.
+    function _freshPriceForShares() internal view returns (uint256 price) {
+        uint256 at;
+        (price, at) = priceWad();
+        if (block.timestamp > at + maxPriceAgeSettle) revert StalePrice();
     }
 
     // --- стоимость ---
@@ -253,7 +290,11 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
         returns (uint256 shares)
     {
         if (paused) revert Paused();
-        uint256 price = _freshPrice();
+        // Пока по рассчитанной неделе не забраны выплаты, будущее движение
+        // инвентаря уже предрешено и в стоимости пая не отражено. Вход в этот
+        // момент — это вход в известный исход за чужой счёт.
+        if (pendingSettled != 0) revert SettlementPending();
+        uint256 price = _freshPriceForShares();
         uint256 addWad = _value(usdgIn, tokenIn, price);
 
         if (totalShares == 0) {
@@ -290,7 +331,10 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
         returns (uint256 usdgOut, uint256 tokenOut)
     {
         if (shares == 0 || shares > sharesOf[msg.sender]) revert BadShares();
-        uint256 price = _freshPrice();
+        // Тот же запрет, что и на вход: иначе выйти можно было бы перед
+        // известным убытком, оставив его тем, кто остался.
+        if (pendingSettled != 0) revert SettlementPending();
+        uint256 price = _freshPriceForShares();
 
         uint256 owed = (_value(freeUsdg + lockedUsdg, freeToken + lockedToken, price) * shares) / totalShares;
         uint256 freeValue = _value(freeUsdg, freeToken, price);
@@ -360,6 +404,7 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
             })
         );
         _byOwner[msg.sender].push(id);
+        openAt[p.expiry] += 1;
 
         if (direction == BUY_LOW) {
             _pullExactly(usdg, amount);
@@ -387,12 +432,46 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
     // --- выплата ---
 
     function claim(uint256 id) external nonReentrant returns (address asset, uint256 amount) {
+        return _close(id, msg.sender, false);
+    }
+
+    /// @notice Выплата на другой адрес. Нужна, если токен акции почему-то не
+    ///         принимает перевод на адрес владельца позиции.
+    function claimTo(uint256 id, address to) external nonReentrant returns (address asset, uint256 amount) {
+        if (to == address(0)) revert NotAllowed();
+        return _close(id, to, false);
+    }
+
+    /// @notice Закрыть чужую позицию через сутки после экспирации. Перевода нет:
+    ///         выплата записывается владельцу в долг. Так неснятая выплата не
+    ///         держит инвентарь вкладчиков в заморозке бесконечно.
+    function resolve(uint256 id) external nonReentrant {
+        Position memory p = _positions[id];
+        if (block.timestamp < uint256(p.expiry) + RESOLVE_DELAY) revert TooEarly();
+        _close(id, p.owner, true);
+    }
+
+    /// @notice Отдать записанный долг его владельцу. Открыто всем: кто угодно
+    ///         может дослать выплату тому, кому она причитается.
+    function withdrawOwed(address who, address asset) external nonReentrant {
+        uint256 amount = owed[who][asset];
+        if (amount == 0) revert NothingOwed();
+        owed[who][asset] = 0;
+        IERC20(asset).safeTransfer(who, amount);
+    }
+
+    function _close(uint256 id, address to, bool credit)
+        internal
+        returns (address asset, uint256 amount)
+    {
         Position storage p = _positions[id];
-        if (p.owner != msg.sender) revert NotYours();
+        if (!credit && p.owner != msg.sender) revert NotYours();
         if (p.claimed) revert AlreadyClaimed();
         uint256 price = settlePriceWad[p.expiry];
         if (price == 0) revert NotSettled();
         p.claimed = true;
+        openAt[p.expiry] -= 1;
+        pendingSettled -= 1;
 
         bool converted = p.direction == BUY_LOW ? price <= p.strikeWad : price >= p.strikeWad;
 
@@ -411,14 +490,14 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
                 amount = p.lockToken;
                 freeUsdg += p.lockUsdg + p.deposit;
                 premium = p.lockToken - _converted(BUY_LOW, p.deposit, p.strikeWad, 0);
-                token.safeTransfer(msg.sender, amount);
+
             } else {
                 asset = address(usdg);
                 amount = p.deposit + p.lockUsdg;
                 freeToken += p.lockToken;
                 premium = p.lockUsdg;
                 premiumInUsdg = true;
-                usdg.safeTransfer(msg.sender, amount);
+
             }
         } else {
             depositsToken -= p.deposit;
@@ -429,18 +508,25 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
                 freeToken += p.lockToken + p.deposit;
                 premium = p.lockUsdg - _converted(SELL_HIGH, p.deposit, p.strikeWad, 0);
                 premiumInUsdg = true;
-                usdg.safeTransfer(msg.sender, amount);
+
             } else {
                 asset = address(token);
                 amount = p.deposit + p.lockToken;
                 freeUsdg += p.lockUsdg;
                 premium = p.lockToken;
-                token.safeTransfer(msg.sender, amount);
+
             }
         }
 
         _takeFee(premiumInUsdg, premium);
-        emit Claimed(id, msg.sender, asset, amount, converted);
+
+        if (credit) {
+            // Перевода нет: выплата записывается в долг и ждёт владельца.
+            owed[p.owner][asset] += amount;
+        } else {
+            IERC20(asset).safeTransfer(to, amount);
+        }
+        emit Claimed(id, p.owner, asset, amount, converted);
     }
 
     /// @notice Что выплатится по позиции. Экран позиций показывает это до нажатия Claim.
@@ -520,11 +606,19 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
         (bool ok, uint256 price, uint256 at) = _roundAt(roundId);
         if (!ok) revert BadPrice();
 
+        // Номер раунда у Chainlink содержит номер фазы, и после смены агрегатора
+        // соседний номер не читается. Нечитаемый сосед — это «неизвестно», а не
+        // «соседа нет»: принять такой раунд значило бы поверить ему на слово.
+        (uint80 latestId,,, uint256 latestAt,) = feed.latestRoundData();
+
         if (at <= expiry) {
             // Цена, действовавшая в момент экспирации: после неё не должно быть
             // раунда, успевшего до экспирации.
             (bool hasNext, uint256 nextAt) = _roundTime(roundId + 1);
             if (hasNext && nextAt <= expiry) revert NotTheSettleRound();
+            // Соседний номер не читается, но последний раунд фида — не этот и
+            // тоже успел до экспирации: значит после него что-то было.
+            if (!hasNext && roundId != latestId && latestAt <= expiry) revert NotTheSettleRound();
             // Фид, замолчавший задолго до закрытия, неделю не рассчитывает: ждём свежей цены.
             if (at + maxPriceAgeSettle < expiry) revert StalePrice();
         } else {
@@ -534,10 +628,16 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
             if (hasPrev) {
                 if (prevAt > expiry) revert NotTheSettleRound();
                 if (prevAt + maxPriceAgeSettle >= expiry) revert NotTheSettleRound();
+            } else if (at > expiry + maxPriceAgeSettle) {
+                // Предыдущего раунда не видно, значит первый ли это раунд после
+                // экспирации — неизвестно. Такой принимается, только если сам он
+                // близок к экспирации по времени.
+                revert NotTheSettleRound();
             }
         }
 
         settlePriceWad[expiry] = price;
+        pendingSettled += openAt[expiry];
         emit Settled(expiry, price, at);
     }
 
@@ -556,6 +656,25 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
     function _roundTime(uint80 roundId) internal view returns (bool ok, uint256 at) {
         (bool found,, uint256 updatedAt) = _roundAt(roundId);
         return (found, updatedAt);
+    }
+
+    /// @notice Поиск раунда для расчёта: идёт назад от `from`, пока раунды
+    ///         моложе экспирации. Вызывается бесплатно и отдаёт номер, который
+    ///         затем передаётся в settleWithRound.
+    function findSettleRound(uint64 expiry, uint80 from, uint16 maxSteps)
+        external
+        view
+        returns (uint80 roundId, bool found)
+    {
+        roundId = from;
+        for (uint16 i = 0; i <= maxSteps; i++) {
+            (bool ok,, uint256 at) = _roundAt(roundId);
+            if (!ok) return (roundId, false);
+            if (at <= expiry) return (roundId, true);
+            if (roundId == 0) return (roundId, false);
+            roundId -= 1;
+        }
+        return (roundId, false);
     }
 
     // --- внутренняя кухня расчёта условий ---
@@ -719,6 +838,9 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
         emit ModelSet(address(premiumModel));
     }
 
+    /// @notice Ужесточение лимитов действует сразу: это защита, и ждать её
+    ///         нельзя. Ослабление — только через scheduleLimits с задержкой,
+    ///         чтобы вкладчик успел выйти, если условия ему разонравились.
     function setLimits(
         uint64 priceAge,
         uint64 priceAgeSettle,
@@ -727,7 +849,73 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
         uint256 maxExpiryLock,
         uint16 lockedShareBps
     ) external onlyOwner {
+        _checkCaps(priceAge, priceAgeSettle, lockedShareBps);
+        Limits memory next = Limits(
+            priceAge, priceAgeSettle, minDeposit, maxPosition, maxExpiryLock, lockedShareBps
+        );
+        if (_loosens(next)) revert UseSchedule();
         _setLimits(priceAge, priceAgeSettle, minDeposit, maxPosition, maxExpiryLock, lockedShareBps);
+    }
+
+    function scheduleLimits(
+        uint64 priceAge,
+        uint64 priceAgeSettle,
+        uint256 minDeposit,
+        uint256 maxPosition,
+        uint256 maxExpiryLock,
+        uint16 lockedShareBps
+    ) external onlyOwner {
+        // Невозможное расписание отклоняется сразу, а не через два дня.
+        _checkCaps(priceAge, priceAgeSettle, lockedShareBps);
+        pendingLimits = Limits(
+            priceAge, priceAgeSettle, minDeposit, maxPosition, maxExpiryLock, lockedShareBps
+        );
+        pendingLimitsEta = block.timestamp + MODEL_DELAY;
+    }
+
+    /// @notice Открыто всем: после задержки применить назначенные лимиты.
+    function applyLimits() external {
+        if (pendingLimitsEta == 0) revert NothingPending();
+        if (block.timestamp < pendingLimitsEta) revert TooEarly();
+        Limits memory next = pendingLimits;
+        pendingLimitsEta = 0;
+        delete pendingLimits;
+        _setLimits(
+            next.maxPriceAge,
+            next.maxPriceAgeSettle,
+            next.minDepositValueWad,
+            next.maxPositionValueWad,
+            next.maxExpiryLockValueWad,
+            next.maxLockedShareBps
+        );
+    }
+
+    /// @dev Ноль в потолке значит «без потолка», то есть самое слабое из возможных.
+    function _loosens(Limits memory next) internal view returns (bool) {
+        if (next.maxPriceAge > maxPriceAge) return true;
+        if (next.maxPriceAgeSettle > maxPriceAgeSettle) return true;
+        if (next.minDepositValueWad < minDepositValueWad) return true;
+        if (next.maxLockedShareBps > maxLockedShareBps) return true;
+        if (_cap(next.maxPositionValueWad) > _cap(maxPositionValueWad)) return true;
+        if (_cap(next.maxExpiryLockValueWad) > _cap(maxExpiryLockValueWad)) return true;
+        return false;
+    }
+
+    function _cap(uint256 value) internal pure returns (uint256) {
+        return value == 0 ? type(uint256).max : value;
+    }
+
+    /// @dev Границы, за которые лимиты не выпускаются ни сразу, ни с задержкой.
+    function _checkCaps(uint64 priceAge, uint64 priceAgeSettle, uint16 lockedShareBps) internal pure {
+        if (priceAge == 0 || priceAge > 7 days) revert TooHigh();
+        if (priceAgeSettle == 0 || priceAgeSettle > 24 hours) revert TooHigh();
+        if (lockedShareBps > BPS) revert TooHigh();
+    }
+
+    /// @notice Отказаться от владения нельзя: без владельца пул теряет паузу,
+    ///         лимиты и вывод комиссии навсегда.
+    function renounceOwnership() public view override onlyOwner {
+        revert NotAllowed();
     }
 
     /// @dev Учёт ведётся по счётчикам, поэтому токен, удерживающий комиссию с
@@ -747,9 +935,7 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
         uint256 maxExpiryLock,
         uint16 lockedShareBps
     ) internal {
-        if (priceAge == 0 || priceAge > 7 days) revert TooHigh();
-        if (priceAgeSettle == 0 || priceAgeSettle > 24 hours) revert TooHigh();
-        if (lockedShareBps > BPS) revert TooHigh();
+        _checkCaps(priceAge, priceAgeSettle, lockedShareBps);
         maxPriceAge = priceAge;
         maxPriceAgeSettle = priceAgeSettle;
         minDepositValueWad = minDeposit;

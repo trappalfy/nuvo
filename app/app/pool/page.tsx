@@ -169,6 +169,13 @@ export default function PoolPage() {
   );
 }
 
+/** Digits and one decimal point. A comma is taken as the point, as typed on many keyboards. */
+function cleanAmount(value: string) {
+  const text = value.replace(/,/g, ".").replace(/[^0-9.]/g, "");
+  const dot = text.indexOf(".");
+  return dot === -1 ? text : `${text.slice(0, dot + 1)}${text.slice(dot + 1).replace(/\./g, "")}`;
+}
+
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline justify-between gap-[16px]">
@@ -206,7 +213,7 @@ function Field({
       <input
         inputMode="decimal"
         value={value}
-        onChange={(e) => onChange(e.target.value.replace(/,/g, ".").replace(/[^0-9.]/g, ""))}
+        onChange={(e) => onChange(cleanAmount(e.target.value))}
         placeholder="0.00"
         aria-label={`Amount in ${label}`}
         className="mt-[8px] h-[52px] w-full rounded-[8px] border border-[#E4E6E2] px-[14px] text-[20px] tabular text-ink outline-none focus:border-ink"

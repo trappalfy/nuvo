@@ -29,6 +29,15 @@ contract MockFeed is IAggregatorV3 {
         return latestRound;
     }
 
+    /// @notice Раунд с произвольным номером. Так изображается смена агрегатора:
+    ///         у Chainlink номер раунда содержит номер фазы, и после ротации
+    ///         соседний номер не читается вовсе.
+    function pushAt(uint80 roundId, int256 answer, uint256 updatedAt) external returns (uint80) {
+        _rounds[roundId] = Round(answer, updatedAt);
+        if (roundId > latestRound) latestRound = roundId;
+        return roundId;
+    }
+
     function latestRoundData() external view returns (uint80, int256, uint256, uint256, uint80) {
         Round memory r = _rounds[latestRound];
         return (latestRound, r.answer, r.updatedAt, r.updatedAt, latestRound);
