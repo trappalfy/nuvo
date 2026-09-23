@@ -6,12 +6,21 @@ import {INuvoPoolFactory} from "../../src/interfaces/INuvoPoolFactory.sol";
 contract MockFactory is INuvoPoolFactory {
     uint64[] public expiries;
 
+    /// @dev A calendar that refuses to answer: a factory behind a proxy that
+    ///      was switched, or an address where the code no longer lives.
+    bool public broken;
+
+    function setBroken(bool value) external {
+        broken = value;
+    }
+
     function setExpiries(uint64[] calldata list) external {
         delete expiries;
         for (uint256 i = 0; i < list.length; i++) expiries.push(list[i]);
     }
 
     function nextExpiry(uint64 minLead) external view returns (uint64) {
+        require(!broken, "calendar down");
         uint64 threshold = uint64(block.timestamp) + minLead;
         for (uint256 i = 0; i < expiries.length; i++) {
             if (expiries[i] > threshold) return expiries[i];

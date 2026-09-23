@@ -689,7 +689,13 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
             return p;
         }
 
-        p.expiry = factory.nextExpiry(MIN_LEAD);
+        // Календарь живёт в фабрике, а она за владельцем: если её подменили
+        // или сняли, preview обязан ответить кодом, а не уронить весь экран.
+        try factory.nextExpiry(MIN_LEAD) returns (uint64 e) {
+            p.expiry = e;
+        } catch {
+            p.expiry = 0;
+        }
 
         (bool ok, uint256 price, uint256 at) = _tryPrice();
         p.priceWad = price;

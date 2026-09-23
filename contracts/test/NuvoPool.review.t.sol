@@ -282,4 +282,23 @@ contract PoolReviewTest is Test {
         vm.expectRevert(NuvoPool.NotAllowed.selector);
         pool.renounceOwnership();
     }
+
+    // --- сломанный календарь: preview отвечает, а не падает ---
+
+    function test_previewSurvivesABrokenCalendar() public {
+        factory.setBroken(true);
+
+        NuvoPool.Preview memory p = pool.preview(0, 200, 40_000e6);
+
+        assertEq(p.code, pool.CODE_NO_EXPIRY(), "the screen must say there is no week");
+        assertEq(p.expiry, 0);
+    }
+
+    function test_subscribingWithABrokenCalendarIsRefusedNotReverted() public {
+        factory.setBroken(true);
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(NuvoPool.Unavailable.selector, pool.CODE_NO_EXPIRY()));
+        pool.subscribe(0, 200, 40_000e6, type(uint256).max, uint64(block.timestamp + 300));
+    }
 }
