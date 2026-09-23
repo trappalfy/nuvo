@@ -384,6 +384,65 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
         return _positions.length;
     }
 
+    // --- расчёт недели ---
+
+    /// @notice Рассчитать экспирацию по текущему раунду фида. Открыто всем.
+    function settle(uint64 expiry) external {
+        (uint80 roundId,,,,) = feed.latestRoundData();
+        _settle(expiry, roundId);
+    }
+
+    /// @notice То же, но раундом, выбранным вручную: если неделю не рассчитали
+    ///         до того, как фид пошёл дальше, или если он молчал через экспирацию.
+    function settleWithRound(uint64 expiry, uint80 roundId) external {
+        _settle(expiry, roundId);
+    }
+
+    function _settle(uint64 expiry, uint80 roundId) internal {
+        if (expiry == 0 || block.timestamp < expiry) revert NotExpired();
+        if (settlePriceWad[expiry] != 0) revert AlreadySettled();
+
+        (bool ok, uint256 price, uint256 at) = _roundAt(roundId);
+        if (!ok) revert BadPrice();
+
+        if (at <= expiry) {
+            // Цена, действовавшая в момент экспирации: после неё не должно быть
+            // раунда, успевшего до экспирации.
+            (bool hasNext, uint256 nextAt) = _roundTime(roundId + 1);
+            if (hasNext && nextAt <= expiry) revert NotTheSettleRound();
+            // Фид, замолчавший задолго до закрытия, неделю не рассчитывает: ждём свежей цены.
+            if (at + maxPriceAgeSettle < expiry) revert StalePrice();
+        } else {
+            // Фид молчал через экспирацию: неделю рассчитывает первый раунд после неё,
+            // и только если предыдущий был слишком стар, чтобы считать по нему.
+            (bool hasPrev, uint256 prevAt) = _roundTime(roundId - 1);
+            if (hasPrev) {
+                if (prevAt > expiry) revert NotTheSettleRound();
+                if (prevAt + maxPriceAgeSettle >= expiry) revert NotTheSettleRound();
+            }
+        }
+
+        settlePriceWad[expiry] = price;
+        emit Settled(expiry, price, at);
+    }
+
+    function _roundAt(uint80 roundId) internal view returns (bool ok, uint256 price, uint256 at) {
+        try feed.getRoundData(roundId) returns (uint80, int256 answer, uint256, uint256 updatedAt, uint80) {
+            if (answer > 0 && updatedAt > 0) {
+                return (true, uint256(answer) * (10 ** (18 - feedDecimals)), updatedAt);
+            }
+        } catch {}
+        return (false, 0, 0);
+    }
+
+    /// @dev Соседний раунд может не существовать, а после смены агрегатора
+    ///      нумерация раундов начинается заново и соседа не найти. В обоих
+    ///      случаях считаем, что соседа нет.
+    function _roundTime(uint80 roundId) internal view returns (bool ok, uint256 at) {
+        (bool found,, uint256 updatedAt) = _roundAt(roundId);
+        return (found, updatedAt);
+    }
+
     // --- внутренняя кухня расчёта условий ---
 
     function _quote(uint8 direction, uint16 distanceBps, uint256 amount)
