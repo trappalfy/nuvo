@@ -1,4 +1,4 @@
-import type { Address, TokenConfig } from "./types";
+import type { Address } from "./types";
 
 // Every address and endpoint comes from env. Nothing here is a stand-in for
 // data: if a value is missing the app says so rather than inventing it.
@@ -16,7 +16,8 @@ export const NETWORK = {
   name: clean(process.env.NEXT_PUBLIC_CHAIN_NAME) || "Robinhood Chain",
   rpcUrl: clean(process.env.NEXT_PUBLIC_RPC_URL),
   explorerUrl: clean(process.env.NEXT_PUBLIC_EXPLORER_URL),
-  nuvo: asAddress(clean(process.env.NEXT_PUBLIC_NUVO_ADDRESS)),
+  /** Реестр пулов. Тикеры, фиды, премии и лимиты читаются у него и у пулов. */
+  factory: asAddress(clean(process.env.NEXT_PUBLIC_FACTORY_ADDRESS)),
 };
 
 /** The public address of the site: absolute links for the preview image and the wallet prompt. */
@@ -28,31 +29,6 @@ export const USDG = {
   /** Read from the token on first use; this is only the fallback for display. */
   decimals: Number(clean(process.env.NEXT_PUBLIC_USDG_DECIMALS) || 6),
 };
-
-/**
- * Tokenized stocks, from `NEXT_PUBLIC_STOCK_TOKENS`, comma separated:
- *
- *   NVDA:0xToken:0xChainlinkFeed, TSLA:0xToken:0xChainlinkFeed
- *
- * The feed is the reference the product settles on. Symbol, name, decimals and
- * the ERC-8056 UI multiplier are read from the token itself.
- */
-export const TOKENS: TokenConfig[] = clean(process.env.NEXT_PUBLIC_STOCK_TOKENS)
-  .split(",")
-  .map((entry) => entry.trim())
-  .filter(Boolean)
-  .flatMap((entry): TokenConfig[] => {
-    const [symbol = "", token = "", feed = ""] = entry.split(":").map((part) => part.trim());
-    const address = asAddress(token);
-    if (!symbol || !address) return [];
-    return [{ symbol: symbol.toUpperCase(), address, feed: asAddress(feed) }];
-  });
-
-/**
- * The market maker quote service. It signs the premium the contract accepts, so
- * without it products can be listed but not subscribed to.
- */
-export const QUOTE_API = clean(process.env.NEXT_PUBLIC_QUOTE_API).replace(/\/$/, "");
 
 /** Brief 1: the ladder, as a distance from the reference in percent. */
 export const LADDER = [2, 4, 6, 8] as const;
@@ -72,15 +48,16 @@ export const SCHEDULE = {
   staleReferenceHours: 6,
 };
 
-/** Limits per product, in the deposited asset. Zero means no limit. */
-export const LIMITS = {
-  minUsdg: Number(clean(process.env.NEXT_PUBLIC_MIN_USDG) || 0),
-  maxUsdg: Number(clean(process.env.NEXT_PUBLIC_MAX_USDG) || 0),
-  minStockValueUsdg: Number(clean(process.env.NEXT_PUBLIC_MIN_STOCK_VALUE_USDG) || 0),
-};
+/**
+ * Лимиты живут в контракте, а не здесь: экран узнаёт их из preview вместе с
+ * причиной отказа. Здесь только то, что нужно самой транзакции.
+ */
 
-/** Quotes older than this have to be refreshed before subscribing. */
-export const QUOTE_TTL_MS = 30_000;
+/** Насколько страйку позволено уехать между просмотром и подтверждением в кошельке. */
+export const STRIKE_TOLERANCE_BPS = 50;
+
+/** Сколько транзакция подписки остаётся действительной. */
+export const TX_DEADLINE_SECONDS = 300;
 
 /**
  * The Nuvo token. Empty until launch, and the Token page says so. The address is
@@ -101,9 +78,9 @@ export const SOCIAL = [
 
 export const hasNetwork = () => NETWORK.chainId > 0 && NETWORK.rpcUrl.length > 0;
 /** Writes need the network too: the receipt is awaited through it. */
-export const hasContracts = () => hasNetwork() && Boolean(NETWORK.nuvo && USDG.address);
-export const hasProducts = () => hasNetwork() && TOKENS.length > 0;
-export const hasQuotes = () => QUOTE_API.length > 0;
+export const hasContracts = () => hasNetwork() && Boolean(NETWORK.factory && USDG.address);
+/** Продукты приходят из реестра фабрики, так что готовность одна и та же. */
+export const hasProducts = () => hasContracts();
 
 export const explorerTx = (hash: string) =>
   NETWORK.explorerUrl ? `${NETWORK.explorerUrl.replace(/\/$/, "")}/tx/${hash}` : undefined;
@@ -115,4 +92,4 @@ export const explorerAddress = (address: string) =>
 export const tokenUrl = () =>
   TOKEN.url || (TOKEN.address ? explorerAddress(TOKEN.address) : undefined);
 
-export const tokenOf = (symbol: string) => TOKENS.find((t) => t.symbol === symbol.toUpperCase());
+
