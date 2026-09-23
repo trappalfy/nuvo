@@ -81,6 +81,10 @@ contract ForkTest is Test {
             )
         );
 
+        // This run is about the real chain and the real token, not about who
+        // is let in; the allowlist has its own suite.
+        pool.setAllowlist(false);
+
         // deal подбирает слот баланса перебором. Если токен окажется прокси со
         // своей раскладкой и deal не сработает, заменить на vm.prank крупного
         // держателя из обозревателя и обычный transfer.
