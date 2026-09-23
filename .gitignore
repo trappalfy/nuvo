@@ -13,3 +13,8 @@ background-nuvo.mp4
 
 # Local rehearsal runs. Real deployments keep their record.
 contracts/broadcast/*/31337/
+
+# Anything that will hold a key. The .example files stay: they hold no secrets.
+.env
+.env.*
+!.env.example
