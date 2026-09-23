@@ -52,7 +52,7 @@ export MAX_POSITION_VALUE_WAD=5000000000000000000000
 export MAX_EXPIRY_LOCK_VALUE_WAD=50000000000000000000000
 export MAX_LOCKED_SHARE_BPS=6000
 export EXPIRIES=$(node script/expiries.mjs 8 | tr -d '[]')
-OUT=$(forge script script/Deploy.s.sol --rpc-url "$RPC" --broadcast 2>&1)
+OUT=$(forge script script/Deploy.s.sol --rpc-url "$RPC" --broadcast --private-key $PRIVATE_KEY 2>&1)
 FACTORY=$(echo "$OUT" | grep -o 'factory 0x[0-9a-fA-F]*' | awk '{print $2}')
 POOL=$(echo "$OUT" | grep -o 'pool 0x[0-9a-fA-F]*' | awk '{print $2}')
 echo "factory $FACTORY"

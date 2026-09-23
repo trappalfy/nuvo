@@ -31,7 +31,11 @@ contract ForkTest is Test {
         vm.createSelectFork(rpc);
 
         usdg = IERC20(USDG);
-        feed = IAggregatorV3(vm.envAddress("FORK_FEED"));
+        // forge подхватывает .env сам, так что RPC_URL может быть задан и без
+        // намерения гонять форк. Без адреса фида это пропуск, а не падение.
+        address feedAddress = vm.envOr("FORK_FEED", address(0));
+        if (feedAddress == address(0)) return;
+        feed = IAggregatorV3(feedAddress);
 
         // Адреса токенизированных акций публично не перечислены, поэтому
         // FORK_TOKEN необязателен: без него на форке разворачивается свой ERC-20

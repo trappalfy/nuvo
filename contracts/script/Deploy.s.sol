@@ -10,17 +10,19 @@ import {PremiumModel} from "../src/PremiumModel.sol";
 ///         передаёт фабрику мультиподписи. Владелец пула — сразу мультиподпись.
 contract Deploy is Script {
     function run() external {
-        uint256 pk = vm.envUint("PRIVATE_KEY");
         address usdg = vm.envAddress("USDG_ADDRESS");
         address token = vm.envAddress("TOKEN_ADDRESS");
         address feed = vm.envAddress("FEED_ADDRESS");
         address multisig = vm.envAddress("OWNER_ADDRESS");
         uint64[] memory expiries = _expiries();
 
-        vm.startBroadcast(pk);
+        // Кто подписывает, решает командная строка: --private-key, --account
+        // с зашифрованным хранилищем или --ledger. Ключ в файле не обязателен.
+        vm.startBroadcast();
+        address deployer = msg.sender;
 
         PremiumModel model = new PremiumModel(_dirs(), _dist(), _bps());
-        NuvoPoolFactory factory = new NuvoPoolFactory(usdg, vm.addr(pk));
+        NuvoPoolFactory factory = new NuvoPoolFactory(usdg, deployer);
         factory.addExpiries(expiries);
 
         address pool = factory.createPool(
