@@ -26,6 +26,7 @@ import type {
   Balance,
   Direction,
   NuvoClient,
+  OwedBalance,
   PoolStats,
   Position,
   PreviewResult,
@@ -528,6 +529,64 @@ export class ChainClient implements NuvoClient {
       abi: nuvoPoolAbi,
       functionName: "claim",
       args: [BigInt(index)],
+      account,
+      chain: nuvoChain,
+    });
+    return this.send(hash, onSubmitted);
+  }
+
+  /**
+   * Payouts the pool holds for this wallet. A position left unclaimed a day
+   * after expiry can be closed by anyone — the inventory behind it has to go
+   * back to work — and the payout is then recorded here instead of being sent.
+   * Without this the money is on chain and invisible.
+   */
+  async getOwed(address?: Address): Promise<OwedBalance[]> {
+    const owner = address ?? this.account;
+    if (!owner || !hasContracts()) return [];
+    const client = this.reader();
+    const usdg = await this.usdgToken();
+    const pools = await this.listPools();
+
+    const perPool = await Promise.all(
+      pools.map(async (pool) => {
+        const assets = [usdg, pool.token];
+        const amounts = await Promise.all(
+          assets.map((asset) =>
+            client.readContract({
+              address: pool.address,
+              abi: nuvoPoolAbi,
+              functionName: "owed",
+              args: [owner, asset.address],
+            }),
+          ),
+        );
+        const rows: OwedBalance[] = [];
+        assets.forEach((asset, i) => {
+          if (amounts[i] === 0n) return;
+          rows.push({
+            id: `${pool.address}:${asset.address}`,
+            pool: pool.address,
+            ticker: pool.token.symbol,
+            token: asset.symbol,
+            amount: Number(toExact(amounts[i], asset.decimals)),
+          });
+        });
+        return rows;
+      }),
+    );
+
+    return perPool.flat();
+  }
+
+  async withdrawOwed(id: string, onSubmitted?: (hash: Address) => void): Promise<TxResult> {
+    const { wallet, account } = this.writer();
+    const [pool, asset] = id.split(":");
+    const hash = await wallet.writeContract({
+      address: pool as Address,
+      abi: nuvoPoolAbi,
+      functionName: "withdrawOwed",
+      args: [account, asset as Address],
       account,
       chain: nuvoChain,
     });

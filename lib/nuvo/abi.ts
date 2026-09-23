@@ -147,6 +147,27 @@ export const nuvoPoolAbi = [
       { name: "amount", type: "uint256" },
     ],
   },
+  // What the pool owes someone whose position was closed for them.
+  {
+    type: "function",
+    name: "owed",
+    stateMutability: "view",
+    inputs: [
+      { name: "who", type: "address" },
+      { name: "asset", type: "address" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "withdrawOwed",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "who", type: "address" },
+      { name: "asset", type: "address" },
+    ],
+    outputs: [],
+  },
   {
     type: "function",
     name: "settlePriceWad",
@@ -242,6 +263,7 @@ export const nuvoPoolAbi = [
   { type: "error", name: "NotSettled", inputs: [] },
   { type: "error", name: "AlreadyClaimed", inputs: [] },
   { type: "error", name: "NotYours", inputs: [] },
+  { type: "error", name: "NothingOwed", inputs: [] },
   { type: "error", name: "Unavailable", inputs: [{ name: "code", type: "uint8" }] },
   {
     type: "event",

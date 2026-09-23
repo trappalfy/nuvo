@@ -9,7 +9,7 @@ import { explorerTx } from "@/lib/nuvo/config";
 import { txErrorMessage } from "@/lib/nuvo/errors";
 import { etLabel } from "@/lib/nuvo/schedule";
 import { client, useNuvo } from "@/lib/nuvo/useNuvo";
-import type { Address, Position } from "@/lib/nuvo/types";
+import type { Address, OwedBalance, Position } from "@/lib/nuvo/types";
 
 const TABS = [
   { id: "active", label: "Active" },
@@ -23,6 +23,7 @@ type Tab = (typeof TABS)[number]["id"];
 export default function PositionsPage() {
   const [tab, setTab] = useState<Tab>("active");
   const [claiming, setClaiming] = useState<string | null>(null);
+  const [withdrawing, setWithdrawing] = useState<string | null>(null);
   const wallet = useWallet();
   const toast = useToast();
   const {
@@ -31,6 +32,12 @@ export default function PositionsPage() {
     error: loadError,
     refresh,
   } = useNuvo((c) => c.getPositions(wallet.address as Address | undefined), [wallet.address]);
+
+  // Payouts the pool is holding because someone else closed the position.
+  const { data: owed, refresh: refreshOwed } = useNuvo(
+    (c) => c.getOwed(wallet.address as Address | undefined),
+    [wallet.address],
+  );
 
   const shown = (positions ?? []).filter((p) =>
     tab === "active"
@@ -65,9 +72,68 @@ export default function PositionsPage() {
     }
   };
 
+  const withdraw = async (row: OwedBalance) => {
+    if (!client.ready.contracts || withdrawing) return;
+    if (!wallet.isRightNetwork) {
+      wallet.switchNetwork();
+      return;
+    }
+    setWithdrawing(row.id);
+    try {
+      const tx = await client.withdrawOwed(row.id, (hash) =>
+        toast({ title: "Withdrawal submitted", tone: "info", href: explorerTx(hash), linkLabel: "Explorer" }),
+      );
+      toast({
+        title: `Withdrew ${amountOf(row.token, row.amount)}`,
+        tone: "success",
+        href: explorerTx(tx.hash),
+        linkLabel: "Explorer",
+      });
+      refreshOwed();
+      refresh();
+    } catch (e) {
+      toast({ title: txErrorMessage(e), tone: "error" });
+    } finally {
+      setWithdrawing(null);
+    }
+  };
+
   return (
     <div>
       <h1 className="text-[40px] leading-none tracking-[-0.03em] text-ink">Positions</h1>
+
+      {/* A position closed by someone else pays into the pool's ledger, not the
+          wallet. Without this the money is on chain and the owner never sees it. */}
+      {wallet.isConnected && (owed ?? []).length > 0 && (
+        <section className="mt-[24px] rounded-[16px] bg-white p-[24px]">
+          <h2 className="t-mono-sm text-dim">Ready to withdraw</h2>
+          <p className="mt-[8px] max-w-[560px] text-[15px] leading-[1.5] text-dim">
+            These positions were closed for you once they had been settled for a day, so their
+            payout is waiting in the pool. Take it whenever you like.
+          </p>
+          <div className="mt-[16px] flex flex-col gap-[10px]">
+            {(owed ?? []).map((row) => (
+              <div
+                key={row.id}
+                className="flex flex-wrap items-center justify-between gap-[12px] border-t border-[#E4E6E2] pt-[10px]"
+              >
+                <span className="text-[17px] tabular text-ink">
+                  {amountOf(row.token, row.amount)}
+                  <span className="text-dim"> · {row.ticker} pool</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => withdraw(row)}
+                  disabled={withdrawing === row.id || !client.ready.contracts}
+                  className="t-mono inline-flex h-[40px] items-center rounded-[8px] bg-ink px-[16px] text-white transition-colors duration-200 hover:bg-ink-hover disabled:cursor-not-allowed disabled:bg-nav disabled:text-dim"
+                >
+                  {withdrawing === row.id ? "Confirming…" : "Withdraw"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <div className="mt-[24px] inline-flex rounded-[10px] bg-nav p-[4px]" role="tablist">
         {TABS.map((item) => (

@@ -24,6 +24,7 @@ const CONTRACT_ERRORS: Record<string, string> = {
   NotSettled: "This week has not been settled yet.",
   AlreadyClaimed: "This position has already been claimed.",
   NotYours: "This position belongs to another wallet.",
+  NothingOwed: "There is nothing left to withdraw here.",
 };
 
 export function txErrorMessage(error: unknown): string {

@@ -99,6 +99,21 @@ export type PoolStats = {
   paused: boolean;
 };
 
+/**
+ * A payout that was closed by someone else. Anyone may close a position a day
+ * after its expiry so the inventory behind it goes back to work; the payout is
+ * then recorded as a debt of the pool instead of being sent. This is that debt.
+ */
+export type OwedBalance = {
+  /** "0xPool:0xAsset" — the pool that owes it and the token it owes. */
+  id: string;
+  pool: Address;
+  ticker: string;
+  /** Symbol of the token owed. */
+  token: string;
+  amount: number;
+};
+
 export type PositionStatus = "active" | "claimable" | "claimed";
 
 export type Position = {
@@ -137,6 +152,8 @@ export interface NuvoClient {
   subscribe(product: Product, amount: string, preview: PreviewResult): Promise<TxResult>;
   getPositions(address?: Address): Promise<Position[]>;
   claim(positionId: string): Promise<TxResult>;
+  getOwed(address?: Address): Promise<OwedBalance[]>;
+  withdrawOwed(id: string): Promise<TxResult>;
   getPoolStats(ticker: string, address?: Address): Promise<PoolStats>;
   addLiquidity(ticker: string, usdgAmount: string, tokenAmount: string): Promise<TxResult>;
   removeLiquidity(ticker: string, shares: bigint): Promise<TxResult>;
