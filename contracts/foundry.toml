@@ -13,5 +13,10 @@ remappings = [
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
 ]
 
+[invariant]
+runs = 64
+depth = 32
+fail_on_revert = false
+
 [fmt]
 line_length = 110
