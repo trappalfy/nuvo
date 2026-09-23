@@ -58,6 +58,9 @@ EXPIRY=$(call "$POOL" "preview(uint8,uint16,uint256)((uint64,uint16,uint256,uint
 DEADLINE=$(( $(cast block --rpc-url "$RPC" latest -f timestamp) + 600 ))
 send "$POOL" "subscribe(uint8,uint16,uint256,uint256,uint64)" 0 200 1000000000 \
   $MAX_UINT "$DEADLINE"
+# A second one, left unclaimed on purpose: that is what resolve() is for.
+send "$POOL" "subscribe(uint8,uint16,uint256,uint256,uint64)" 0 200 1000000000 \
+  $MAX_UINT "$DEADLINE"
 echo "expiry $EXPIRY, positions $(call "$POOL" "positionsOf(address)(uint256[])" "$ME")"
 
 say "the week closes"
@@ -78,6 +81,24 @@ send "$POOL" "claim(uint256)" 0
 AFTER=$(call "$TOKEN_ADDRESS" "balanceOf(address)(uint256)" "$ME")
 echo "stock before $BEFORE"
 echo "stock after  $AFTER"
+
+say "the position nobody claimed"
+# A day after expiry anyone may close it so the inventory goes back to work.
+# The payout becomes a debt of the pool - what the Positions screen reads.
+cast rpc --rpc-url "$RPC" evm_setNextBlockTimestamp $((EXPIRY + 90000)) >/dev/null
+send "$FEED_ADDRESS" "push(int256,uint256)" 9000000000 $((EXPIRY + 89000))
+send "$POOL" "resolve(uint256)" 1
+OWED=$(call "$POOL" "owed(address,address)(uint256)" "$ME" "$TOKEN_ADDRESS")
+echo "owed to $ME: $OWED"
+case "$OWED" in 0*) echo "resolve() left nothing owed"; exit 1;; esac
+
+say "withdrawing it"
+BEFORE=$(call "$TOKEN_ADDRESS" "balanceOf(address)(uint256)" "$ME")
+send "$POOL" "withdrawOwed(address,address)" "$ME" "$TOKEN_ADDRESS"
+AFTER=$(call "$TOKEN_ADDRESS" "balanceOf(address)(uint256)" "$ME")
+echo "stock before $BEFORE"
+echo "stock after  $AFTER"
+echo "owed now     $(call "$POOL" "owed(address,address)(uint256)" "$ME" "$TOKEN_ADDRESS")"
 
 say "settle again: nothing left to do"
 RPC_URL=$RPC node script/settle.mjs
