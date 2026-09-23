@@ -8,11 +8,11 @@ import { ReferenceScale } from "@/components/app/ReferenceScale";
 import { useWallet } from "@/components/app/AppProviders";
 import { useToast } from "@/components/app/Toaster";
 import { amountOf, apr, pct, qty, signedPct, usd } from "@/lib/format";
-import { LIMITS, USDG, explorerTx } from "@/lib/nuvo/config";
-import { quoteErrorMessage, txErrorMessage } from "@/lib/nuvo/errors";
+import { NETWORK, USDG, explorerTx } from "@/lib/nuvo/config";
+import { txErrorMessage, unavailableMessage } from "@/lib/nuvo/errors";
 import { expiryLabel } from "@/lib/nuvo/schedule";
 import { client, useNow, useNuvo, useWeek } from "@/lib/nuvo/useNuvo";
-import type { Address, Direction, Quote } from "@/lib/nuvo/types";
+import type { Address, Direction, PreviewResult } from "@/lib/nuvo/types";
 
 export default function TickerPage({ params }: { params: Promise<{ ticker: string }> }) {
   const { ticker } = use(params);
@@ -34,9 +34,9 @@ function Subscribe({ symbol }: { symbol: string }) {
   const step = Number(search.get("target") ?? 2);
 
   const [amount, setAmount] = useState("");
-  const [quote, setQuote] = useState<Quote | undefined>(undefined);
-  const [quoteLoading, setQuoteLoading] = useState(false);
-  const [quoteError, setQuoteError] = useState<string | undefined>(undefined);
+  const [terms, setTerms] = useState<PreviewResult | undefined>(undefined);
+  const [termsLoading, setTermsLoading] = useState(false);
+  const [termsError, setTermsError] = useState<string | undefined>(undefined);
   const [pending, setPending] = useState<"approve" | "subscribe" | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
   // Blocks a second press before the pending state has rendered.
@@ -58,35 +58,27 @@ function Subscribe({ symbol }: { symbol: string }) {
     [products, step],
   );
 
-  // Amounts here are display units, stocks already through the ERC-8056
-  // multiplier. The client converts to base units at the contract.
+  // Amounts here are display units. The feed prices the token itself, so the
+  // ERC-8056 multiplier never enters the arithmetic.
   const depositToken = direction === "buyLow" ? USDG.symbol : symbol;
   const balance = balances?.[depositToken]?.amount;
   const exactBalance = balances?.[depositToken]?.exact;
   const amountNumber = Number(amount) || 0;
 
   const { data: allowance } = useNuvo(
-    (c) => c.getAllowance(depositToken, owner),
-    [depositToken, owner, pending],
+    (c) => (product ? c.getAllowance(depositToken, product.pool, owner) : Promise.resolve(0)),
+    [depositToken, owner, pending, product?.pool],
   );
 
-  const minimum =
-    direction === "buyLow"
-      ? LIMITS.minUsdg
-      : product && LIMITS.minStockValueUsdg
-        ? LIMITS.minStockValueUsdg / product.reference.price
-        : 0;
-  const maximum = direction === "buyLow" ? LIMITS.maxUsdg : 0;
+  const premiumBps = terms?.premiumBps || product?.premiumBps;
 
-  // A quote is signed for one product and one amount. Anything else is not used.
-  const quoteFits =
-    !!quote && !!product && quote.productId === product.id && quote.input === amount;
-  const staleQuote = !!quote && now > quote.expiresAt;
-  const premiumBps = (quoteFits ? quote?.premiumBps : undefined) ?? product?.premiumBps;
-
-  // Brief 8: the outcome numbers move as the amount is typed. Until a premium
-  // is known they are shown without it, marked "+ premium".
+  // Brief 8: the outcome numbers move as the amount is typed. They come from
+  // the pool; before the contracts are configured the screen shows the same
+  // arithmetic off the rung's premium rather than an empty panel.
   const outcomes = useMemo(() => {
+    if (terms && amountNumber > 0 && terms.premiumBps > 0) {
+      return { converted: terms.ifConverted, kept: terms.ifNot };
+    }
     if (!product || amountNumber <= 0) return undefined;
     const r = (premiumBps ?? 0) / 10_000;
     return direction === "buyLow"
@@ -98,75 +90,62 @@ function Subscribe({ symbol }: { symbol: string }) {
           converted: { token: USDG.symbol, amount: amountNumber * product.targetPrice * (1 + r) },
           kept: { token: symbol, amount: amountNumber * (1 + r) },
         };
-  }, [amountNumber, direction, premiumBps, product, symbol]);
+  }, [amountNumber, direction, premiumBps, product, symbol, terms]);
 
-  // A signed quote is fetched for each amount; it goes stale after its expiry.
+  // The terms are read from the pool: premium, strike and both outcomes for
+  // the amount typed. No signature, no expiry to watch.
   useEffect(() => {
-    if (!product || amountNumber <= 0 || !client.ready.quotes) {
-      setQuote(undefined);
-      setQuoteError(undefined);
-      setQuoteLoading(false);
+    if (!product || !client.ready.contracts) {
+      setTerms(undefined);
+      setTermsError(undefined);
+      setTermsLoading(false);
       return;
     }
     let alive = true;
-    setQuoteLoading(true);
-    setQuoteError(undefined);
+    setTermsLoading(true);
+    setTermsError(undefined);
     const id = setTimeout(() => {
       client
-        .getQuote(product, amount)
-        .then((q) => {
-          if (alive) setQuote(q);
+        .getPreview(product, amount || "0")
+        .then((result) => {
+          if (alive) setTerms(result);
         })
-        .catch((e) => {
+        .catch(() => {
           if (!alive) return;
-          setQuote(undefined);
-          setQuoteError(quoteErrorMessage(e));
+          setTerms(undefined);
+          setTermsError("The pool is not answering right now");
         })
         .finally(() => {
-          if (alive) setQuoteLoading(false);
+          if (alive) setTermsLoading(false);
         });
     }, 300);
     return () => {
       alive = false;
       clearTimeout(id);
     };
-  }, [amount, amountNumber, product]);
+  }, [amount, product]);
 
   const setParams = (next: { direction?: Direction; target?: number }) => {
     const params = new URLSearchParams(search.toString());
     if (next.direction) params.set("direction", next.direction);
     if (next.target) params.set("target", String(next.target));
     router.replace(`?${params.toString()}`, { scroll: false });
-    setQuote(undefined);
+    setTerms(undefined);
     setError(undefined);
-  };
-
-  const refreshQuote = () => {
-    if (!product || amountNumber <= 0) return;
-    setQuoteLoading(true);
-    setQuoteError(undefined);
-    client
-      .getQuote(product, amount)
-      .then(setQuote)
-      .catch((e) => {
-        setQuote(undefined);
-        setQuoteError(quoteErrorMessage(e));
-      })
-      .finally(() => setQuoteLoading(false));
   };
 
   const submitted = (title: string) => (hash: Address) =>
     toast({ title, tone: "info", href: explorerTx(hash), linkLabel: "Explorer" });
 
-  // Contract writes stay inert until the Nuvo contract is configured: the
-  // buttons look and behave like the live ones, a press simply does nothing.
+  // Contract writes stay inert until the factory is configured: the buttons
+  // look and behave like the live ones, a press simply does nothing.
   const onApprove = async () => {
-    if (!client.ready.contracts || busy.current) return;
+    if (!client.ready.contracts || busy.current || !product) return;
     busy.current = true;
     setError(undefined);
     setPending("approve");
     try {
-      await client.approve(depositToken, amount, submitted(`Approving ${depositToken}`));
+      await client.approve(depositToken, product.pool, amount, submitted(`Approving ${depositToken}`));
       toast({ title: `${depositToken} approved`, tone: "success" });
     } catch (e) {
       const message = txErrorMessage(e);
@@ -180,15 +159,14 @@ function Subscribe({ symbol }: { symbol: string }) {
 
   const onSubscribe = async () => {
     if (!client.ready.contracts || busy.current) return;
-    if (!product || !quote || !quoteFits) return;
+    if (!product || !terms || terms.code !== 0) return;
     busy.current = true;
     setError(undefined);
     setPending("subscribe");
     try {
-      const tx = await client.subscribe(product, amount, quote, submitted("Subscription submitted"));
+      const tx = await client.subscribe(product, amount, terms, submitted("Subscription submitted"));
       toast({ title: "Subscribed", tone: "success", href: explorerTx(tx.hash), linkLabel: "Explorer" });
       setAmount("");
-      setQuote(undefined);
     } catch (e) {
       const message = txErrorMessage(e);
       setError(message);
@@ -199,9 +177,9 @@ function Subscribe({ symbol }: { symbol: string }) {
     }
   };
 
-  // Brief 8: every state of the subscribe button, in order of precedence. The
-  // allowance and quote steps need the contract and the quote service, so they
-  // only come into play once those are configured.
+  // Brief 8: every state of the subscribe button, in order of precedence. Once
+  // the factory is configured the pool names the reason it will not take a
+  // subscription, and the limits come with it.
   const action = (() => {
     if (!wallet.isConnected) return { label: "Connect wallet", onClick: wallet.connect };
     if (!wallet.isRightNetwork) return { label: "Switch network", onClick: wallet.switchNetwork };
@@ -209,15 +187,14 @@ function Subscribe({ symbol }: { symbol: string }) {
     if (amountNumber <= 0) return { label: "Enter an amount", disabled: true };
     if (balance !== undefined && amountNumber > balance)
       return { label: `Not enough ${depositToken} in your wallet`, disabled: true };
-    if (minimum > 0 && amountNumber < minimum)
-      return { label: `Minimum ${amountOf(depositToken, minimum)}`, disabled: true };
-    if (maximum > 0 && amountNumber > maximum)
-      return { label: `Maximum ${amountOf(depositToken, maximum)}`, disabled: true };
     if (client.ready.contracts) {
-      if ((allowance ?? 0) < amountNumber) return { label: `Approve ${depositToken}`, onClick: onApprove };
-      if (!client.ready.quotes) return { label: "Quotes are unavailable right now", disabled: true };
-      if (quoteLoading) return { label: "Fetching quote…", disabled: true };
-      if (quoteError || !quoteFits || staleQuote) return { label: "Refresh quote", onClick: refreshQuote };
+      if ((allowance ?? 0) < amountNumber)
+        return { label: `Approve ${depositToken}`, onClick: onApprove };
+      if (termsLoading) return { label: "Reading the pool…", disabled: true };
+      if (termsError) return { label: termsError, disabled: true };
+      if (!terms) return { label: "Reading the pool…", disabled: true };
+      if (terms.code !== 0)
+        return { label: unavailableMessage(terms.code, depositToken), disabled: true };
     }
     return { label: "Subscribe", onClick: onSubscribe };
   })();
@@ -402,7 +379,7 @@ function Subscribe({ symbol }: { symbol: string }) {
               value={
                 premiumBps !== undefined
                   ? `${pct(premiumBps)} · est. ${apr(premiumBps)} APR`
-                  : "Quoted on entry"
+                  : "Set by the pool on entry"
               }
             />
             <Row
@@ -433,15 +410,13 @@ function Subscribe({ symbol }: { symbol: string }) {
             {action.label}
           </button>
 
-          {(error || quoteError) && (
-            <p className="mt-[12px] text-[14px] text-[#8A3B2F]">{error ?? quoteError}</p>
+          {(error || termsError) && (
+            <p className="mt-[12px] text-[14px] text-[#8A3B2F]">{error ?? termsError}</p>
           )}
 
-          {quote && quoteFits && !staleQuote && !quoteLoading && (
-            <p className="mt-[12px] t-mono-sm text-dim">
-              Quote good for {Math.max(0, Math.ceil((quote.expiresAt - now) / 1000))}s
-            </p>
-          )}
+          <p className="mt-[12px] t-mono-sm text-dim">
+            Network fees on {NETWORK.name} are paid in ETH.
+          </p>
         </aside>
       </div>
     </div>

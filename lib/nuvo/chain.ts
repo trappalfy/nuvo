@@ -7,21 +7,18 @@ import {
   type WalletClient,
 } from "viem";
 import { nuvoChain } from "../wallet/chain";
-import { aggregatorV3Abi, erc20Abi, nuvoDualAbi, productId as deriveProductId } from "./abi";
+import { directionIndex, erc20Abi, nuvoFactoryAbi, nuvoPoolAbi } from "./abi";
 import { CATALOG, catalogProducts } from "./catalog";
 import {
   LADDER,
   NETWORK,
-  QUOTE_API,
-  QUOTE_TTL_MS,
   SCHEDULE,
-  TOKENS,
+  STRIKE_TOLERANCE_BPS,
+  TX_DEADLINE_SECONDS,
   USDG,
   hasContracts,
   hasNetwork,
   hasProducts,
-  hasQuotes,
-  tokenOf,
 } from "./config";
 import { currentWeek, isMarketOpen } from "./schedule";
 import type {
@@ -29,9 +26,10 @@ import type {
   Balance,
   Direction,
   NuvoClient,
+  PoolStats,
   Position,
+  PreviewResult,
   Product,
-  Quote,
   Reference,
   TickerInfo,
   TokenInfo,
@@ -44,14 +42,6 @@ export class NotConfiguredError extends Error {
   constructor(what: string) {
     super(`${what} is not configured`);
     this.name = "NotConfiguredError";
-  }
-}
-
-/** Thrown when the market maker cannot price a subscription right now. */
-export class QuoteUnavailableError extends Error {
-  constructor(message = "Quotes are unavailable right now") {
-    super(message);
-    this.name = "QuoteUnavailableError";
   }
 }
 
@@ -84,35 +74,26 @@ export class TxRevertedError extends Error {
 
 const WAD = 10n ** 18n;
 
-/**
- * ERC-8056 multiplier as 18-decimal fixed point. A token that reports a small
- * plain factor instead (2 after a 2:1 split) is read as that factor; none, or
- * zero, is 1.
- */
-const multiplierWad = (value: bigint) =>
-  value <= 0n ? WAD : value < 10n ** 9n ? value * WAD : value;
-
 /** Typed text, cut to the token's decimals so it never rounds up. */
-const truncate = (amount: string, decimals: number) => {
-  const [whole = "", fraction = ""] = amount.trim().split(".");
+const toBase = (amount: string, decimals: number) => {
+  const [whole = "", fraction = ""] = (amount || "0").trim().split(".");
   const cut = fraction.slice(0, decimals);
-  return `${whole || "0"}${cut ? `.${cut}` : ""}`;
+  return parseUnits(`${whole || "0"}${cut ? `.${cut}` : ""}`, decimals);
 };
 
-/** Display units, as typed, to the token's base units. Exact, rounded down. */
-const toBase = (amount: string, token: TokenInfo) =>
-  (parseUnits(truncate(amount, token.decimals), token.decimals) * WAD) / token.uiMultiplierWad;
+/** Base units to an exact decimal string. */
+const toExact = (value: bigint, decimals: number) => formatUnits(value, decimals);
 
-/** Base units to display units, rounded down, as an exact decimal string. */
-const toDisplay = (value: bigint, token: TokenInfo) =>
-  formatUnits((value * token.uiMultiplierWad) / WAD, token.decimals);
+/** A WAD price as the number the screens show. */
+const priceOf = (wad: bigint) => Number(formatUnits(wad, 18));
+
+export type PoolInfo = { address: Address; token: TokenInfo; feed: Address };
 
 export class ChainClient implements NuvoClient {
   readonly ready = {
     network: hasNetwork(),
     contracts: hasContracts(),
     products: hasProducts(),
-    quotes: hasQuotes(),
   };
 
   private publicClient: PublicClient | null = hasNetwork()
@@ -121,7 +102,8 @@ export class ChainClient implements NuvoClient {
 
   private wallet: WalletClient | null = null;
   private account: Address | undefined;
-  private tokens = new Map<string, TokenInfo>();
+  private poolCache: Promise<PoolInfo[]> | null = null;
+  private usdgInfo: TokenInfo | null = null;
   private listeners = new Set<() => void>();
 
   /** The provider layer hands the connected wallet down after every change. */
@@ -150,260 +132,10 @@ export class ChainClient implements NuvoClient {
 
   private writer() {
     if (!this.wallet || !this.account) throw new NoWalletError();
-    if (!NETWORK.nuvo) throw new NotConfiguredError("The Nuvo contract");
+    if (!NETWORK.factory) throw new NotConfiguredError("The Nuvo factory");
     // Without a reader the receipt could not be awaited after sending.
     this.reader();
-    return { wallet: this.wallet, account: this.account, nuvo: NETWORK.nuvo };
-  }
-
-  async getWeek(): Promise<Week> {
-    return currentWeek();
-  }
-
-  async getToken(symbol: string): Promise<TokenInfo> {
-    const key = symbol.toUpperCase();
-    const cached = this.tokens.get(key);
-    if (cached) return cached;
-
-    const address =
-      key === USDG.symbol.toUpperCase() ? USDG.address : tokenOf(key)?.address;
-    if (!address) throw new NotConfiguredError(`${key}`);
-
-    const client = this.reader();
-    const contract = { address, abi: erc20Abi } as const;
-
-    const [name, decimals, multiplier] = await Promise.all([
-      client.readContract({ ...contract, functionName: "name" }).catch(() => key),
-      client.readContract({ ...contract, functionName: "decimals" }),
-      // ERC-8056 is optional on a token; without it amounts are shown as they are.
-      client.readContract({ ...contract, functionName: "uiMultiplier" }).catch(() => 0n),
-    ]);
-
-    const wad = multiplierWad(BigInt(multiplier));
-    const info: TokenInfo = {
-      symbol: key,
-      address,
-      name: String(name),
-      decimals: Number(decimals),
-      uiMultiplier: Number(formatUnits(wad, 18)),
-      uiMultiplierWad: wad,
-    };
-    this.tokens.set(key, info);
-    return info;
-  }
-
-  /** Chainlink reference the products settle on. */
-  private async reference(feed: Address): Promise<Reference> {
-    const client = this.reader();
-    const [decimals, round] = await Promise.all([
-      client.readContract({ address: feed, abi: aggregatorV3Abi, functionName: "decimals" }),
-      client.readContract({ address: feed, abi: aggregatorV3Abi, functionName: "latestRoundData" }),
-    ]);
-    const [, answer, , updatedAt] = round;
-    const updated = Number(updatedAt) * 1000;
-    return {
-      price: Number(formatUnits(answer, Number(decimals))),
-      updatedAt: updated,
-      // Outside market hours the feed rests at the last close; that is not stale.
-      stale: isMarketOpen() && Date.now() - updated > SCHEDULE.staleReferenceHours * 3600_000,
-      source: "chain",
-    };
-  }
-
-  /**
-   * Premiums for the week come from the market maker. The endpoint answers
-   * `{ premiums: [{ productId, premiumBps }] }`; anything else leaves the ladder
-   * without premiums rather than showing a made-up number.
-   */
-  private async premiums(weekId: string, direction: Direction): Promise<Map<string, number>> {
-    if (!hasQuotes()) return new Map();
-    try {
-      const response = await fetch(
-        `${QUOTE_API}/premiums?week=${encodeURIComponent(weekId)}&direction=${direction}`,
-        { headers: { accept: "application/json" } },
-      );
-      if (!response.ok) return new Map();
-      const body = (await response.json()) as {
-        premiums?: { productId: string; premiumBps: number }[];
-      };
-      return new Map(
-        (body.premiums ?? [])
-          .filter((p) => typeof p.productId === "string" && isPremium(p.premiumBps))
-          .map((p) => [p.productId.toLowerCase(), p.premiumBps]),
-      );
-    } catch {
-      return new Map();
-    }
-  }
-
-  /** The tickers on offer, in display order. */
-  async listTickers(): Promise<TickerInfo[]> {
-    if (!hasProducts()) {
-      return CATALOG.map(({ symbol, name }) => ({ symbol, name, uiMultiplier: 1 }));
-    }
-    return Promise.all(
-      TOKENS.map(async (token) => {
-        try {
-          const info = await this.getToken(token.symbol);
-          return { symbol: token.symbol, name: info.name, uiMultiplier: info.uiMultiplier };
-        } catch {
-          return { symbol: token.symbol, name: token.symbol, uiMultiplier: 1 };
-        }
-      }),
-    );
-  }
-
-  async listProducts(direction: Direction, ticker?: string): Promise<Product[]> {
-    // Until the tokens and feeds are configured the line-up comes from the catalog.
-    if (!hasProducts()) return catalogProducts(direction, ticker);
-
-    const week = currentWeek();
-    const wanted = ticker
-      ? TOKENS.filter((token) => token.symbol === ticker.toUpperCase())
-      : TOKENS;
-    const premiums = await this.premiums(week.id, direction);
-
-    const perToken = await Promise.all(
-      wanted.map(async (token) => {
-        if (!token.feed) return [];
-        let reference: Reference;
-        try {
-          reference = await this.reference(token.feed);
-        } catch {
-          return [];
-        }
-
-        return LADDER.map((step) => {
-          const offset = direction === "buyLow" ? -step : step;
-          const id = deriveProductId(week.id, token.symbol, direction, step * 100);
-          const targetPrice = Number((reference.price * (1 + offset / 100)).toFixed(2));
-          return {
-            id,
-            weekId: week.id,
-            ticker: token.symbol,
-            direction,
-            targetPrice,
-            targetOffset: offset,
-            reference,
-            premiumBps: premiums.get(id.toLowerCase()),
-            expiresAt: week.expiresAt,
-            status: week.isOpen ? "open" : "locked",
-          } satisfies Product;
-        });
-      }),
-    );
-
-    return perToken.flat();
-  }
-
-  async getQuote(product: Product, amount: string): Promise<Quote> {
-    if (!hasQuotes()) throw new QuoteUnavailableError();
-
-    const depositSymbol = product.direction === "buyLow" ? USDG.symbol : product.ticker;
-    const token = await this.getToken(depositSymbol);
-    const value = Number(amount);
-
-    const response = await fetch(`${QUOTE_API}/quote`, {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify({
-        productId: product.id,
-        amount: toBase(amount, token).toString(),
-        account: this.account,
-      }),
-    }).catch(() => null);
-
-    if (!response?.ok) throw new QuoteUnavailableError();
-
-    const body = (await response.json().catch(() => ({}))) as {
-      premiumBps?: unknown;
-      signature?: unknown;
-      expiresAt?: unknown;
-    };
-    if (!isPremium(body.premiumBps)) throw new QuoteUnavailableError();
-    if (typeof body.signature !== "string" || !/^0x[0-9a-fA-F]+$/.test(body.signature)) {
-      throw new QuoteUnavailableError();
-    }
-    const premiumBps = body.premiumBps;
-
-    // README: expiresAt is in ms. A value in seconds is taken as seconds.
-    const expiresAt =
-      typeof body.expiresAt === "number" && Number.isFinite(body.expiresAt)
-        ? body.expiresAt < 1e12
-          ? body.expiresAt * 1000
-          : body.expiresAt
-        : Date.now() + QUOTE_TTL_MS;
-
-    const r = premiumBps / 10_000;
-    // Brief 1: D x (1 + r) / K stock or D x (1 + r) USDG for Buy Low,
-    // Q x K x (1 + r) USDG or Q x (1 + r) stock for Sell High.
-    const converted =
-      product.direction === "buyLow"
-        ? { token: product.ticker, amount: (value * (1 + r)) / product.targetPrice }
-        : { token: USDG.symbol, amount: value * product.targetPrice * (1 + r) };
-    const kept =
-      product.direction === "buyLow"
-        ? { token: USDG.symbol, amount: value * (1 + r) }
-        : { token: product.ticker, amount: value * (1 + r) };
-
-    return {
-      productId: product.id,
-      amount: value,
-      input: amount,
-      premiumBps,
-      premiumAmount: value * r,
-      ifConverted: converted,
-      ifNot: kept,
-      signature: body.signature as Address,
-      expiresAt,
-    };
-  }
-
-  async getBalances(address?: Address): Promise<Record<string, Balance>> {
-    const owner = address ?? this.account;
-    if (!owner || !hasNetwork()) return {};
-
-    const client = this.reader();
-    const symbols = [USDG.symbol, ...TOKENS.map((token) => token.symbol)];
-
-    const entries = await Promise.all(
-      symbols.map(async (symbol) => {
-        try {
-          const token = await this.getToken(symbol);
-          const balance = await client.readContract({
-            address: token.address,
-            abi: erc20Abi,
-            functionName: "balanceOf",
-            args: [owner],
-          });
-          const exact = toDisplay(balance, token);
-          return [symbol, { amount: Number(exact), exact }] as const;
-        } catch {
-          return null;
-        }
-      }),
-    );
-
-    return Object.fromEntries(
-      entries.filter((entry): entry is readonly [string, Balance] => !!entry),
-    );
-  }
-
-  async getAllowance(symbol: string, owner?: Address): Promise<number> {
-    const account = owner ?? this.account;
-    if (!account || !NETWORK.nuvo) return 0;
-    try {
-      const token = await this.getToken(symbol);
-      const allowance = await this.reader().readContract({
-        address: token.address,
-        abi: erc20Abi,
-        functionName: "allowance",
-        args: [account, NETWORK.nuvo],
-      });
-      return Number(toDisplay(allowance, token));
-    } catch {
-      return 0;
-    }
+    return { wallet: this.wallet, account: this.account };
   }
 
   /** Hands the hash out as soon as the wallet signs, then waits for the receipt. */
@@ -422,18 +154,257 @@ export class ChainClient implements NuvoClient {
     return { hash };
   }
 
+  async getWeek(): Promise<Week> {
+    return currentWeek();
+  }
+
+  // --- the registry ---
+
+  /** The factory's registry, read once per page load. */
+  async listPools(): Promise<PoolInfo[]> {
+    if (!hasContracts()) return [];
+    if (!this.poolCache) {
+      this.poolCache = this.readPools().catch((e) => {
+        this.poolCache = null;
+        throw e;
+      });
+    }
+    return this.poolCache;
+  }
+
+  private async readPools(): Promise<PoolInfo[]> {
+    const client = this.reader();
+    const factory = NETWORK.factory!;
+    const count = await client.readContract({
+      address: factory,
+      abi: nuvoFactoryAbi,
+      functionName: "poolCount",
+    });
+
+    const addresses = await Promise.all(
+      Array.from({ length: Number(count) }, (_, i) =>
+        client.readContract({
+          address: factory,
+          abi: nuvoFactoryAbi,
+          functionName: "pools",
+          args: [BigInt(i)],
+        }),
+      ),
+    );
+
+    return Promise.all(
+      addresses.map(async (address) => {
+        const [token, feed] = await Promise.all([
+          client.readContract({ address, abi: nuvoPoolAbi, functionName: "token" }),
+          client.readContract({ address, abi: nuvoPoolAbi, functionName: "feed" }),
+        ]);
+        return { address, token: await this.tokenAt(token), feed } satisfies PoolInfo;
+      }),
+    );
+  }
+
+  private async tokenAt(address: Address): Promise<TokenInfo> {
+    const client = this.reader();
+    const contract = { address, abi: erc20Abi } as const;
+    const [name, symbol, decimals, multiplier] = await Promise.all([
+      client.readContract({ ...contract, functionName: "name" }).catch(() => ""),
+      client.readContract({ ...contract, functionName: "symbol" }),
+      client.readContract({ ...contract, functionName: "decimals" }),
+      // ERC-8056 is optional on a token; without it the label is simply 1.
+      client.readContract({ ...contract, functionName: "uiMultiplier" }).catch(() => 0n),
+    ]);
+    const wad = BigInt(multiplier);
+    return {
+      symbol: String(symbol).toUpperCase(),
+      address,
+      name: String(name) || String(symbol),
+      decimals: Number(decimals),
+      uiMultiplier: wad > 0n ? Number(formatUnits(wad, 18)) : 1,
+    };
+  }
+
+  private async usdgToken(): Promise<TokenInfo> {
+    if (this.usdgInfo) return this.usdgInfo;
+    if (!USDG.address) throw new NotConfiguredError("USDG");
+    this.usdgInfo = await this.tokenAt(USDG.address);
+    return this.usdgInfo;
+  }
+
+  private async poolFor(ticker: string): Promise<PoolInfo> {
+    const pools = await this.listPools();
+    const found = pools.find((p) => p.token.symbol === ticker.toUpperCase());
+    if (!found) throw new NotConfiguredError(ticker.toUpperCase());
+    return found;
+  }
+
+  private async tokenBySymbol(symbol: string): Promise<TokenInfo> {
+    const key = symbol.toUpperCase();
+    const usdg = await this.usdgToken();
+    if (key === usdg.symbol) return usdg;
+    return (await this.poolFor(key)).token;
+  }
+
+  async listTickers(): Promise<TickerInfo[]> {
+    if (!hasProducts()) {
+      return CATALOG.map(({ symbol, name }) => ({ symbol, name, uiMultiplier: 1 }));
+    }
+    const pools = await this.listPools();
+    return pools.map((p) => ({
+      symbol: p.token.symbol,
+      name: p.token.name,
+      uiMultiplier: p.token.uiMultiplier,
+    }));
+  }
+
+  // --- the ladder ---
+
+  async listProducts(direction: Direction, ticker?: string): Promise<Product[]> {
+    // Until the factory is configured the line-up comes from the catalog.
+    if (!hasProducts()) return catalogProducts(direction, ticker);
+
+    const pools = await this.listPools();
+    const wanted = ticker ? pools.filter((p) => p.token.symbol === ticker.toUpperCase()) : pools;
+
+    const perPool = await Promise.all(
+      wanted.map(async (pool) => {
+        const rungs = await Promise.all(
+          LADDER.map((step) => this.rawPreview(pool.address, direction, step * 100, 0n)),
+        );
+        return rungs.flatMap((raw, index) => {
+          if (!raw) return [];
+          const step = LADDER[index];
+          const price = priceOf(raw.priceWad);
+          if (price <= 0) return [];
+          const updatedAt = Number(raw.priceUpdatedAt) * 1000;
+          const reference: Reference = {
+            price,
+            updatedAt,
+            // Outside market hours the feed rests at the last close; that is not stale.
+            stale: isMarketOpen() && Date.now() - updatedAt > SCHEDULE.staleReferenceHours * 3600_000,
+            source: "chain",
+          };
+          return [
+            {
+              id: `${pool.address}:${direction}:${step * 100}`,
+              pool: pool.address,
+              ticker: pool.token.symbol,
+              direction,
+              distanceBps: step * 100,
+              targetOffset: direction === "buyLow" ? -step : step,
+              targetPrice: priceOf(raw.strikeWad),
+              strikeWad: raw.strikeWad,
+              reference,
+              premiumBps: raw.premiumBps > 0 ? raw.premiumBps : undefined,
+              expiresAt: Number(raw.expiry) * 1000,
+              status: "open",
+            } satisfies Product,
+          ];
+        });
+      }),
+    );
+
+    return perPool.flat();
+  }
+
+  private async rawPreview(pool: Address, direction: Direction, distanceBps: number, amount: bigint) {
+    try {
+      return await this.reader().readContract({
+        address: pool,
+        abi: nuvoPoolAbi,
+        functionName: "preview",
+        args: [directionIndex(direction), distanceBps, amount],
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  /** The terms for the amount typed. This is what replaced the quote service. */
+  async getPreview(product: Product, amount: string): Promise<PreviewResult> {
+    const pool = await this.poolFor(product.ticker);
+    const usdg = await this.usdgToken();
+    const deposit = product.direction === "buyLow" ? usdg : pool.token;
+    const converted = product.direction === "buyLow" ? pool.token : usdg;
+
+    const raw = await this.rawPreview(
+      product.pool,
+      product.direction,
+      product.distanceBps,
+      toBase(amount, deposit.decimals),
+    );
+    if (!raw) throw new NotConfiguredError("The pool");
+
+    return {
+      code: Number(raw.code),
+      premiumBps: Number(raw.premiumBps),
+      strikeWad: raw.strikeWad,
+      expiresAt: Number(raw.expiry) * 1000,
+      ifConverted: {
+        token: converted.symbol,
+        amount: Number(toExact(raw.ifConverted, converted.decimals)),
+      },
+      ifNot: { token: deposit.symbol, amount: Number(toExact(raw.ifNot, deposit.decimals)) },
+    };
+  }
+
+  // --- wallet ---
+
+  async getBalances(address?: Address): Promise<Record<string, Balance>> {
+    const owner = address ?? this.account;
+    if (!owner || !hasNetwork() || !USDG.address) return {};
+    const client = this.reader();
+    const tokens = [await this.usdgToken(), ...(await this.listPools()).map((p) => p.token)];
+
+    const entries = await Promise.all(
+      tokens.map(async (token) => {
+        try {
+          const balance = await client.readContract({
+            address: token.address,
+            abi: erc20Abi,
+            functionName: "balanceOf",
+            args: [owner],
+          });
+          const exact = toExact(balance, token.decimals);
+          return [token.symbol, { amount: Number(exact), exact }] as const;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    return Object.fromEntries(entries.filter((e): e is readonly [string, Balance] => !!e));
+  }
+
+  /** The allowance is given to the pool that will pull the deposit. */
+  async getAllowance(symbol: string, spender: Address, owner?: Address): Promise<number> {
+    const account = owner ?? this.account;
+    if (!account) return 0;
+    try {
+      const token = await this.tokenBySymbol(symbol);
+      const allowance = await this.reader().readContract({
+        address: token.address,
+        abi: erc20Abi,
+        functionName: "allowance",
+        args: [account, spender],
+      });
+      return Number(toExact(allowance, token.decimals));
+    } catch {
+      return 0;
+    }
+  }
+
   async approve(
     symbol: string,
+    spender: Address,
     amount: string,
     onSubmitted?: (hash: Address) => void,
   ): Promise<TxResult> {
-    const { wallet, account, nuvo } = this.writer();
-    const token = await this.getToken(symbol);
+    const { wallet, account } = this.writer();
+    const token = await this.tokenBySymbol(symbol);
     const hash = await wallet.writeContract({
       address: token.address,
       abi: erc20Abi,
       functionName: "approve",
-      args: [nuvo, toBase(amount, token)],
+      args: [spender, toBase(amount, token.decimals)],
       account,
       chain: nuvoChain,
     });
@@ -443,154 +414,237 @@ export class ChainClient implements NuvoClient {
   async subscribe(
     product: Product,
     amount: string,
-    quote: Quote,
+    preview: PreviewResult,
     onSubmitted?: (hash: Address) => void,
   ): Promise<TxResult> {
-    const { wallet, account, nuvo } = this.writer();
-    // The signature covers one product and one amount; anything else would revert.
-    if (quote.productId !== product.id || quote.input !== amount || Date.now() > quote.expiresAt) {
-      throw new QuoteUnavailableError("The quote has expired. Refresh it.");
-    }
-    const depositSymbol = product.direction === "buyLow" ? USDG.symbol : product.ticker;
-    const token = await this.getToken(depositSymbol);
+    const { wallet, account } = this.writer();
+    const pool = await this.poolFor(product.ticker);
+    const usdg = await this.usdgToken();
+    const deposit = product.direction === "buyLow" ? usdg : pool.token;
+
+    // The strike is taken from the live price when the transaction lands. This
+    // is how far it is allowed to have moved: Buy Low suffers when the price
+    // rises, Sell High when it falls.
+    const tolerance = BigInt(STRIKE_TOLERANCE_BPS);
+    const limitStrike =
+      product.direction === "buyLow"
+        ? (preview.strikeWad * (10_000n + tolerance)) / 10_000n
+        : (preview.strikeWad * (10_000n - tolerance)) / 10_000n;
 
     const hash = await wallet.writeContract({
-      address: nuvo,
-      abi: nuvoDualAbi,
+      address: product.pool,
+      abi: nuvoPoolAbi,
       functionName: "subscribe",
-      args: [product.id, toBase(amount, token), quote.signature],
+      args: [
+        directionIndex(product.direction),
+        product.distanceBps,
+        toBase(amount, deposit.decimals),
+        limitStrike,
+        BigInt(Math.floor(Date.now() / 1000) + TX_DEADLINE_SECONDS),
+      ],
       account,
       chain: nuvoChain,
     });
     return this.send(hash, onSubmitted);
   }
+
+  // --- positions ---
 
   async getPositions(address?: Address): Promise<Position[]> {
     const owner = address ?? this.account;
-    if (!owner || !NETWORK.nuvo || !hasNetwork()) return [];
-
+    if (!owner || !hasContracts()) return [];
     const client = this.reader();
-    const ids = await client.readContract({
-      address: NETWORK.nuvo,
-      abi: nuvoDualAbi,
-      functionName: "positionsOf",
-      args: [owner],
-    });
+    const usdg = await this.usdgToken();
+    const pools = await this.listPools();
 
-    const positions = await Promise.all(
-      ids.map(async (id) => {
-        const [
-          ,
-          positionProductId,
-          amount,
-          premiumBps,
-          status,
-          depositToken,
-          payoutToken,
-          payoutAmount,
-          subscribedAt,
-        ] = await client.readContract({
-          address: NETWORK.nuvo!,
-          abi: nuvoDualAbi,
-          functionName: "position",
-          args: [id],
+    const perPool = await Promise.all(
+      pools.map(async (pool) => {
+        const ids = await client.readContract({
+          address: pool.address,
+          abi: nuvoPoolAbi,
+          functionName: "positionsOf",
+          args: [owner],
         });
 
-        const [tickerBytes, , targetPrice, expiry, , settlePrice] = await client.readContract({
-          address: NETWORK.nuvo!,
-          abi: nuvoDualAbi,
-          functionName: "product",
-          args: [positionProductId],
-        });
+        return Promise.all(
+          ids.map(async (id) => {
+            const [p, payout] = await Promise.all([
+              client.readContract({
+                address: pool.address,
+                abi: nuvoPoolAbi,
+                functionName: "position",
+                args: [id],
+              }),
+              client.readContract({
+                address: pool.address,
+                abi: nuvoPoolAbi,
+                functionName: "positionPayout",
+                args: [id],
+              }),
+            ]);
 
-        const ticker = hexToTicker(tickerBytes);
-        const direction: Direction =
-          depositToken.toLowerCase() === USDG.address?.toLowerCase() ? "buyLow" : "sellHigh";
+            const direction: Direction = Number(p.direction) === 0 ? "buyLow" : "sellHigh";
+            const deposit = direction === "buyLow" ? usdg : pool.token;
+            const [settled, converted, asset, amount] = payout;
+            const payoutToken =
+              asset.toLowerCase() === usdg.address.toLowerCase() ? usdg : pool.token;
 
-        const deposit = await this.tokenByAddress(depositToken, ticker, direction);
-        const payout = await this.tokenByAddress(payoutToken, ticker, direction, true);
-
-        const settled = Number(status) >= 1;
-        const claimed = Number(status) === 2;
-
-        return {
-          id: id.toString(),
-          productId: positionProductId,
-          ticker,
-          direction,
-          targetPrice: Number(formatUnits(targetPrice, 8)),
-          premiumBps: Number(premiumBps),
-          amount: Number(toDisplay(amount, deposit)),
-          depositToken: deposit.symbol,
-          subscribedAt: Number(subscribedAt) * 1000,
-          expiresAt: Number(expiry) * 1000,
-          status: claimed ? "claimed" : settled ? "claimable" : "active",
-          ...(settled
-            ? {
-                settlement: {
-                  settlePrice: Number(formatUnits(settlePrice, 8)),
-                  converted: payoutToken.toLowerCase() !== depositToken.toLowerCase(),
-                  payout: { token: payout.symbol, amount: Number(toDisplay(payoutAmount, payout)) },
-                },
-              }
-            : {}),
-        } satisfies Position;
+            return {
+              id: `${pool.address}:${id.toString()}`,
+              pool: pool.address,
+              ticker: pool.token.symbol,
+              direction,
+              targetPrice: priceOf(p.strikeWad),
+              premiumBps: Number(p.premiumBps),
+              amount: Number(toExact(p.deposit, deposit.decimals)),
+              depositToken: deposit.symbol,
+              expiresAt: Number(p.expiry) * 1000,
+              status: p.claimed ? "claimed" : settled ? "claimable" : "active",
+              ...(settled
+                ? {
+                    settlement: {
+                      converted,
+                      payout: {
+                        token: payoutToken.symbol,
+                        amount: Number(toExact(amount, payoutToken.decimals)),
+                      },
+                    },
+                  }
+                : {}),
+            } satisfies Position;
+          }),
+        );
       }),
     );
 
-    return positions.sort((a, b) => b.subscribedAt - a.subscribedAt);
-  }
-
-  /** Resolve a token address back to the symbol and decimals the UI shows. */
-  private async tokenByAddress(
-    address: Address,
-    ticker: string,
-    direction: Direction,
-    payout = false,
-  ): Promise<TokenInfo> {
-    const usdgFirst = payout ? direction === "sellHigh" : direction === "buyLow";
-    const candidates = usdgFirst ? [USDG.symbol, ticker] : [ticker, USDG.symbol];
-    for (const symbol of candidates) {
-      try {
-        const token = await this.getToken(symbol);
-        if (token.address.toLowerCase() === address.toLowerCase()) return token;
-      } catch {
-        // Not configured; try the other one.
-      }
-    }
-    return {
-      symbol: ticker,
-      address,
-      name: ticker,
-      decimals: 18,
-      uiMultiplier: 1,
-      uiMultiplierWad: WAD,
-    };
+    return perPool.flat().sort((a, b) => b.expiresAt - a.expiresAt);
   }
 
   async claim(positionId: string, onSubmitted?: (hash: Address) => void): Promise<TxResult> {
-    const { wallet, account, nuvo } = this.writer();
+    const { wallet, account } = this.writer();
+    const [pool, index] = positionId.split(":");
     const hash = await wallet.writeContract({
-      address: nuvo,
-      abi: nuvoDualAbi,
+      address: pool as Address,
+      abi: nuvoPoolAbi,
       functionName: "claim",
-      args: [BigInt(positionId)],
+      args: [BigInt(index)],
       account,
       chain: nuvoChain,
     });
     return this.send(hash, onSubmitted);
   }
-}
 
-/** A weekly premium the UI can show: a finite number of bps under 100%. */
-function isPremium(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value < 10_000;
-}
+  // --- the depositor's side ---
 
-/** Tickers are bytes32 on chain, right-padded with zeros. */
-function hexToTicker(value: Address): string {
-  const hex = value.slice(2).replace(/(00)+$/, "");
-  let out = "";
-  for (let i = 0; i < hex.length; i += 2) out += String.fromCharCode(parseInt(hex.slice(i, i + 2), 16));
-  return out.trim();
+  async getPoolStats(ticker: string, address?: Address): Promise<PoolStats> {
+    const pool = await this.poolFor(ticker);
+    const owner = address ?? this.account;
+    const client = this.reader();
+    const [value, free, total, shares, paused] = await Promise.all([
+      client.readContract({ address: pool.address, abi: nuvoPoolAbi, functionName: "poolValueWad" }),
+      client.readContract({ address: pool.address, abi: nuvoPoolAbi, functionName: "freeValueWad" }),
+      client.readContract({ address: pool.address, abi: nuvoPoolAbi, functionName: "totalShares" }),
+      owner
+        ? client.readContract({
+            address: pool.address,
+            abi: nuvoPoolAbi,
+            functionName: "sharesOf",
+            args: [owner],
+          })
+        : Promise.resolve(0n),
+      client.readContract({ address: pool.address, abi: nuvoPoolAbi, functionName: "paused" }),
+    ]);
+
+    return {
+      pool: pool.address,
+      ticker: pool.token.symbol,
+      valueUsdg: priceOf(value),
+      freeUsdg: priceOf(free),
+      shares,
+      totalShares: total,
+      myValueUsdg: total > 0n ? priceOf((value * shares) / total) : 0,
+      paused,
+    };
+  }
+
+  /**
+   * The pool takes a floor on what a deposit or a withdrawal must return. Sent
+   * as zero it would accept any price, so both are derived from the pool's own
+   * figures read a moment earlier, with a tolerance.
+   */
+  private static readonly LP_TOLERANCE_BPS = 100n;
+
+  private async poolFigures(pool: Address) {
+    const client = this.reader();
+    const [value, free, total, freeUsdgAmount, freeTokenAmount, price] = await Promise.all([
+      client.readContract({ address: pool, abi: nuvoPoolAbi, functionName: "poolValueWad" }),
+      client.readContract({ address: pool, abi: nuvoPoolAbi, functionName: "freeValueWad" }),
+      client.readContract({ address: pool, abi: nuvoPoolAbi, functionName: "totalShares" }),
+      client.readContract({ address: pool, abi: nuvoPoolAbi, functionName: "freeUsdg" }),
+      client.readContract({ address: pool, abi: nuvoPoolAbi, functionName: "freeToken" }),
+      client.readContract({ address: pool, abi: nuvoPoolAbi, functionName: "priceWad" }),
+    ]);
+    return { value, free, total, freeUsdgAmount, freeTokenAmount, price: price[0] };
+  }
+
+  private static floor(amount: bigint) {
+    return (amount * (10_000n - ChainClient.LP_TOLERANCE_BPS)) / 10_000n;
+  }
+
+  async addLiquidity(
+    ticker: string,
+    usdgAmount: string,
+    tokenAmount: string,
+    onSubmitted?: (hash: Address) => void,
+  ): Promise<TxResult> {
+    const { wallet, account } = this.writer();
+    const pool = await this.poolFor(ticker);
+    const usdg = await this.usdgToken();
+    const usdgIn = toBase(usdgAmount || "0", usdg.decimals);
+    const tokenIn = toBase(tokenAmount || "0", pool.token.decimals);
+
+    const { value, total, price } = await this.poolFigures(pool.address);
+    const addWad =
+      usdgIn * 10n ** BigInt(18 - usdg.decimals) +
+      (tokenIn * 10n ** BigInt(18 - pool.token.decimals) * price) / WAD;
+    const expected = total > 0n && value > 0n ? (addWad * total) / value : addWad;
+
+    const hash = await wallet.writeContract({
+      address: pool.address,
+      abi: nuvoPoolAbi,
+      functionName: "addLiquidity",
+      args: [usdgIn, tokenIn, ChainClient.floor(expected)],
+      account,
+      chain: nuvoChain,
+    });
+    return this.send(hash, onSubmitted);
+  }
+
+  async removeLiquidity(
+    ticker: string,
+    shares: bigint,
+    onSubmitted?: (hash: Address) => void,
+  ): Promise<TxResult> {
+    const { wallet, account } = this.writer();
+    const pool = await this.poolFor(ticker);
+    const { value, free, total, freeUsdgAmount, freeTokenAmount } = await this.poolFigures(
+      pool.address,
+    );
+
+    // The same arithmetic the pool does, so the floors are the payout the
+    // depositor was shown rather than a guess.
+    const owedWad = total > 0n ? (value * shares) / total : 0n;
+    const minUsdg = free > 0n ? ChainClient.floor((freeUsdgAmount * owedWad) / free) : 0n;
+    const minToken = free > 0n ? ChainClient.floor((freeTokenAmount * owedWad) / free) : 0n;
+
+    const hash = await wallet.writeContract({
+      address: pool.address,
+      abi: nuvoPoolAbi,
+      functionName: "removeLiquidity",
+      args: [shares, minUsdg, minToken],
+      account,
+      chain: nuvoChain,
+    });
+    return this.send(hash, onSubmitted);
+  }
 }

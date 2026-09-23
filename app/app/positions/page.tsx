@@ -176,8 +176,8 @@ export default function PositionsPage() {
                 {position.settlement ? (
                   <>
                     <Cell
-                      label="Settled at"
-                      value={`$${usd(position.settlement.settlePrice)}`}
+                      label="Your price"
+                      value={`$${usd(position.targetPrice)}`}
                       hint={position.settlement.converted ? "Converted" : "Not converted"}
                     />
                     <Cell

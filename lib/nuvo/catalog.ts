@@ -1,11 +1,10 @@
-import { productId } from "./abi";
 import { LADDER } from "./config";
 import { currentWeek } from "./schedule";
-import type { Direction, Product } from "./types";
+import type { Address, Direction, Product } from "./types";
 
 // The line-up shown until the chain is configured: the tickers, a reference
-// figure for each and the weekly premium per rung. Once NEXT_PUBLIC_STOCK_TOKENS
-// and the feeds are set, listProducts reads the chain and none of this is used.
+// figure for each and the weekly premium per rung. Once NEXT_PUBLIC_FACTORY_ADDRESS
+// is set, listProducts reads the pools and none of this is used.
 //
 // TODO(launch): these are indicative figures, not market data. Refresh them, or
 // configure the chain, before the site is public.
@@ -47,12 +46,16 @@ export function catalogProducts(direction: Direction, ticker?: string): Product[
     LADDER.map((step) => {
       const offset = direction === "buyLow" ? -step : step;
       return {
-        id: productId(week.id, item.symbol, direction, step * 100),
-        weekId: week.id,
+        id: `catalog:${item.symbol}:${direction}:${step * 100}`,
+        // No pool yet: the screens keep their buttons inert until the factory
+        // is configured, so nothing is ever sent to this address.
+        pool: "0x0000000000000000000000000000000000000000" as Address,
         ticker: item.symbol,
         direction,
-        targetPrice: Number((item.reference * (1 + offset / 100)).toFixed(2)),
+        distanceBps: step * 100,
         targetOffset: offset,
+        targetPrice: Number((item.reference * (1 + offset / 100)).toFixed(2)),
+        strikeWad: 0n,
         reference: { price: item.reference, updatedAt: 0, stale: false, source: "catalog" },
         premiumBps: premiumFor(item.symbol, offset),
         expiresAt: week.expiresAt,

@@ -1,21 +1,13 @@
 // The shape the screens read. One implementation, ChainClient, backed by the
-// network and the contracts from env.
+// network and the factory from env.
 //
-// Amounts on this side are in display units: what the user sees and types,
-// stocks already through the ERC-8056 multiplier. The client converts to the
-// token's base units at the contract.
+// Amounts on this side are in display units: what the user sees and types. The
+// feed prices the token itself, so the ERC-8056 multiplier never enters an
+// amount — it is a label, nothing more.
 
 export type Direction = "buyLow" | "sellHigh";
 
 export type Address = `0x${string}`;
-
-/** A tokenized stock, as configured in env. */
-export type TokenConfig = {
-  symbol: string;
-  address: Address;
-  /** Chainlink feed the product settles on. */
-  feed?: Address;
-};
 
 /** What the token contract itself reports. */
 export type TokenInfo = {
@@ -23,17 +15,15 @@ export type TokenInfo = {
   address: Address;
   name: string;
   decimals: number;
-  /** ERC-8056: amounts are shown multiplied by this. */
+  /** ERC-8056: how many shares one token stands for. Shown, never multiplied in. */
   uiMultiplier: number;
-  /** The same multiplier as 18-decimal fixed point, for exact conversions. */
-  uiMultiplierWad: bigint;
 };
 
 /** A wallet balance in display units, with the exact decimal string for Max. */
 export type Balance = { amount: number; exact: string };
 
 export type Week = {
-  /** ISO date of the Monday in ET. Also the id the product ids are derived from. */
+  /** ISO date of the Monday in ET. */
   id: string;
   /** "Week of Sep 14–18" */
   label: string;
@@ -52,7 +42,7 @@ export type Reference = {
   updatedAt: number;
   /** True when the feed has not updated inside the window from the config. */
   stale: boolean;
-  /** "chain" is a Chainlink read; "catalog" is the line-up used before the chain is configured. */
+  /** "chain" is a pool read; "catalog" is the line-up used before the chain is configured. */
   source: "chain" | "catalog";
 };
 
@@ -64,54 +54,66 @@ export type TickerInfo = {
 };
 
 export type Product = {
-  /** bytes32, derived in abi.ts and matched by the contract. */
-  id: Address;
-  weekId: string;
+  /** Key for React: the pool, the direction and the rung. */
+  id: string;
+  pool: Address;
   ticker: string;
   direction: Direction;
-  targetPrice: number;
-  /** Distance from the reference in percent: -2 for Buy Low -2%. */
+  /** Distance to the target in bps: 200 for 2%. */
+  distanceBps: number;
+  /** The same distance as a signed percentage, for the label. */
   targetOffset: number;
+  targetPrice: number;
+  strikeWad: bigint;
   reference: Reference;
-  /** From the quote service. Undefined while it has no premium for this rung. */
   premiumBps?: number;
   expiresAt: number;
   status: ProductStatus;
-  settlePrice?: number;
 };
 
-export type Quote = {
-  productId: Address;
-  amount: number;
-  /** The amount as typed. A quote is only used for the amount it was signed for. */
-  input: string;
+/** What the pool answers for one amount: premium, strike and both outcomes. */
+export type PreviewResult = {
+  /** 0 means the pool will take it; anything else is the reason it will not. */
+  code: number;
   premiumBps: number;
-  premiumAmount: number;
+  strikeWad: bigint;
+  expiresAt: number;
   /** Payout if the reference reaches the target. */
   ifConverted: { token: string; amount: number };
   /** Payout if it does not. */
   ifNot: { token: string; amount: number };
-  /** Market maker signature the contract verifies. */
-  signature: Address;
-  expiresAt: number;
+};
+
+/** The depositor's side of one pool. */
+export type PoolStats = {
+  pool: Address;
+  ticker: string;
+  /** Value of the depositors' inventory, in USDG. */
+  valueUsdg: number;
+  /** The free part: this much can be withdrawn right now. */
+  freeUsdg: number;
+  shares: bigint;
+  totalShares: bigint;
+  /** The depositor's share, in USDG. */
+  myValueUsdg: number;
+  paused: boolean;
 };
 
 export type PositionStatus = "active" | "claimable" | "claimed";
 
 export type Position = {
+  /** "0xPool:index" — the pool that holds it and its index there. */
   id: string;
-  productId: Address;
+  pool: Address;
   ticker: string;
   direction: Direction;
   targetPrice: number;
   premiumBps: number;
   amount: number;
   depositToken: string;
-  subscribedAt: number;
   expiresAt: number;
   status: PositionStatus;
   settlement?: {
-    settlePrice: number;
     converted: boolean;
     payout: { token: string; amount: number };
   };
@@ -124,17 +126,20 @@ export type TxResult = {
 
 export interface NuvoClient {
   /** Reads that need the network, and writes that need the contracts. */
-  readonly ready: { network: boolean; contracts: boolean; products: boolean; quotes: boolean };
+  readonly ready: { network: boolean; contracts: boolean; products: boolean };
   getWeek(): Promise<Week>;
-  getToken(symbol: string): Promise<TokenInfo>;
+  listTickers(): Promise<TickerInfo[]>;
   listProducts(direction: Direction, ticker?: string): Promise<Product[]>;
-  getQuote(product: Product, amount: string): Promise<Quote>;
+  getPreview(product: Product, amount: string): Promise<PreviewResult>;
   getBalances(address?: Address): Promise<Record<string, Balance>>;
-  getAllowance(symbol: string, owner?: Address): Promise<number>;
-  approve(symbol: string, amount: string): Promise<TxResult>;
-  subscribe(product: Product, amount: string, quote: Quote): Promise<TxResult>;
+  getAllowance(symbol: string, spender: Address, owner?: Address): Promise<number>;
+  approve(symbol: string, spender: Address, amount: string): Promise<TxResult>;
+  subscribe(product: Product, amount: string, preview: PreviewResult): Promise<TxResult>;
   getPositions(address?: Address): Promise<Position[]>;
   claim(positionId: string): Promise<TxResult>;
+  getPoolStats(ticker: string, address?: Address): Promise<PoolStats>;
+  addLiquidity(ticker: string, usdgAmount: string, tokenAmount: string): Promise<TxResult>;
+  removeLiquidity(ticker: string, shares: bigint): Promise<TxResult>;
   /** Screens repaint on this after a write lands. */
   onChange(listener: () => void): () => void;
 }

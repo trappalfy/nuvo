@@ -1,129 +1,270 @@
-import { keccak256, encodePacked } from "viem";
 import type { Direction } from "./types";
 
-// The contract surface the app talks to. The contracts are not deployed yet, so
-// this is the agreed shape: the UI is written against it, and the contract stage
-// has to match it. Edits belong here and in chain.ts, nowhere else.
+// The contract surface the app talks to: the factory registry and one pool per
+// ticker. Edits belong here and in chain.ts, nowhere else.
 
 /** On-chain direction enum. */
 export const DirectionEnum = { BuyLow: 0, SellHigh: 1 } as const;
 
-/** On-chain product status enum. */
-export const StatusEnum = { Open: 0, Locked: 1, Settled: 2 } as const;
-
-/** On-chain position status enum. */
-export const PositionStatusEnum = { Open: 0, Settled: 1, Claimed: 2 } as const;
-
 export const directionIndex = (direction: Direction) =>
   direction === "buyLow" ? DirectionEnum.BuyLow : DirectionEnum.SellHigh;
 
-/**
- * How a product id is derived. The app builds ids locally so the ladder can be
- * rendered before any of it is touched on chain; the contract must derive them
- * the same way or `product(productId)` will miss.
- *
- * keccak256(abi.encodePacked(weekId, ticker, direction, targetBps))
- *
- * weekId is the ISO date of the Monday in ET ("2026-09-14"), targetBps is the
- * distance from the reference in basis points (200 for 2%).
- */
-export const productId = (weekId: string, ticker: string, direction: Direction, targetBps: number) =>
-  keccak256(
-    encodePacked(
-      ["string", "string", "uint8", "uint16"],
-      [weekId, ticker, directionIndex(direction), targetBps],
-    ),
-  );
+/** Why the pool will not take a subscription. It comes back as a number from preview. */
+export const UnavailableCode = {
+  Ok: 0,
+  Paused: 1,
+  NoExpiry: 2,
+  BadPrice: 3,
+  StalePrice: 4,
+  NoPremium: 5,
+  ZeroAmount: 6,
+  BelowMin: 7,
+  AboveMax: 8,
+  ExpiryFull: 9,
+  NoInventory: 10,
+  TooMuchLocked: 11,
+  BadDistance: 12,
+} as const;
 
-export const nuvoDualAbi = [
+export const nuvoFactoryAbi = [
+  {
+    type: "function",
+    name: "poolCount",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "pools",
+    stateMutability: "view",
+    inputs: [{ name: "index", type: "uint256" }],
+    outputs: [{ name: "", type: "address" }],
+  },
+  {
+    type: "function",
+    name: "nextExpiry",
+    stateMutability: "view",
+    inputs: [{ name: "minLead", type: "uint64" }],
+    outputs: [{ name: "", type: "uint64" }],
+  },
+] as const;
+
+const previewOutput = {
+  name: "",
+  type: "tuple",
+  components: [
+    { name: "expiry", type: "uint64" },
+    { name: "premiumBps", type: "uint16" },
+    { name: "strikeWad", type: "uint256" },
+    { name: "priceWad", type: "uint256" },
+    { name: "priceUpdatedAt", type: "uint256" },
+    { name: "ifConverted", type: "uint256" },
+    { name: "ifNot", type: "uint256" },
+    { name: "lockUsdg", type: "uint256" },
+    { name: "lockToken", type: "uint256" },
+    { name: "code", type: "uint8" },
+  ],
+} as const;
+
+export const nuvoPoolAbi = [
+  { type: "function", name: "token", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] },
+  { type: "function", name: "usdg", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] },
+  { type: "function", name: "feed", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] },
+  {
+    type: "function",
+    name: "preview",
+    stateMutability: "view",
+    inputs: [
+      { name: "direction", type: "uint8" },
+      { name: "distanceBps", type: "uint16" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [previewOutput],
+  },
   {
     type: "function",
     name: "subscribe",
     stateMutability: "nonpayable",
     inputs: [
-      { name: "productId", type: "bytes32" },
+      { name: "direction", type: "uint8" },
+      { name: "distanceBps", type: "uint16" },
       { name: "amount", type: "uint256" },
-      { name: "signedQuote", type: "bytes" },
+      { name: "limitStrikeWad", type: "uint256" },
+      { name: "deadline", type: "uint64" },
     ],
-    outputs: [{ name: "positionId", type: "uint256" }],
+    outputs: [{ name: "id", type: "uint256" }],
   },
   {
     type: "function",
     name: "claim",
     stateMutability: "nonpayable",
-    inputs: [{ name: "positionId", type: "uint256" }],
+    inputs: [{ name: "id", type: "uint256" }],
     outputs: [
-      { name: "token", type: "address" },
+      { name: "asset", type: "address" },
       { name: "amount", type: "uint256" },
-    ],
-  },
-  {
-    type: "function",
-    name: "product",
-    stateMutability: "view",
-    inputs: [{ name: "productId", type: "bytes32" }],
-    outputs: [
-      { name: "ticker", type: "bytes32" },
-      { name: "direction", type: "uint8" },
-      { name: "targetPrice", type: "uint256" },
-      { name: "expiry", type: "uint64" },
-      { name: "status", type: "uint8" },
-      { name: "settlePrice", type: "int256" },
     ],
   },
   {
     type: "function",
     name: "positionsOf",
     stateMutability: "view",
-    inputs: [{ name: "user", type: "address" }],
+    inputs: [{ name: "who", type: "address" }],
     outputs: [{ name: "", type: "uint256[]" }],
   },
-  // Added for the app: positionsOf gives ids, the screens need the position
-  // itself, and the payout has to be readable before Claim is pressed.
   {
     type: "function",
     name: "position",
     stateMutability: "view",
-    inputs: [{ name: "positionId", type: "uint256" }],
+    inputs: [{ name: "id", type: "uint256" }],
     outputs: [
-      { name: "user", type: "address" },
-      { name: "productId", type: "bytes32" },
-      { name: "amount", type: "uint256" },
-      { name: "premiumBps", type: "uint256" },
-      { name: "status", type: "uint8" },
-      { name: "depositToken", type: "address" },
-      { name: "payoutToken", type: "address" },
-      { name: "payoutAmount", type: "uint256" },
-      { name: "subscribedAt", type: "uint64" },
+      {
+        name: "",
+        type: "tuple",
+        components: [
+          { name: "owner", type: "address" },
+          { name: "direction", type: "uint8" },
+          { name: "premiumBps", type: "uint16" },
+          { name: "expiry", type: "uint64" },
+          { name: "claimed", type: "bool" },
+          { name: "deposit", type: "uint256" },
+          { name: "strikeWad", type: "uint256" },
+          { name: "lockUsdg", type: "uint256" },
+          { name: "lockToken", type: "uint256" },
+        ],
+      },
     ],
   },
+  {
+    type: "function",
+    name: "positionPayout",
+    stateMutability: "view",
+    inputs: [{ name: "id", type: "uint256" }],
+    outputs: [
+      { name: "settled", type: "bool" },
+      { name: "converted", type: "bool" },
+      { name: "asset", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+  },
+  {
+    type: "function",
+    name: "settlePriceWad",
+    stateMutability: "view",
+    inputs: [{ name: "expiry", type: "uint64" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "addLiquidity",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "usdgIn", type: "uint256" },
+      { name: "tokenIn", type: "uint256" },
+      { name: "minShares", type: "uint256" },
+    ],
+    outputs: [{ name: "shares", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "removeLiquidity",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "shares", type: "uint256" },
+      { name: "minUsdgOut", type: "uint256" },
+      { name: "minTokenOut", type: "uint256" },
+    ],
+    outputs: [
+      { name: "usdgOut", type: "uint256" },
+      { name: "tokenOut", type: "uint256" },
+    ],
+  },
+  {
+    type: "function",
+    name: "totalShares",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "sharesOf",
+    stateMutability: "view",
+    inputs: [{ name: "who", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "poolValueWad",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "freeValueWad",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  { type: "function", name: "freeUsdg", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
+  { type: "function", name: "freeToken", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint256" }] },
+  { type: "function", name: "paused", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "bool" }] },
+  {
+    type: "function",
+    name: "priceWad",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "price", type: "uint256" },
+      { name: "updatedAt", type: "uint256" },
+    ],
+  },
+  {
+    type: "function",
+    name: "pendingSettled",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  // The pool's own errors, so a failed transaction can say what happened
+  // instead of "try again".
+  { type: "error", name: "SettlementPending", inputs: [] },
+  { type: "error", name: "InventoryLocked", inputs: [] },
+  { type: "error", name: "StalePrice", inputs: [] },
+  { type: "error", name: "BadPrice", inputs: [] },
+  { type: "error", name: "Slippage", inputs: [] },
+  { type: "error", name: "StrikeMoved", inputs: [] },
+  { type: "error", name: "Expired", inputs: [] },
+  { type: "error", name: "TooSmall", inputs: [] },
+  { type: "error", name: "BadShares", inputs: [] },
+  { type: "error", name: "Paused", inputs: [] },
+  { type: "error", name: "NotSettled", inputs: [] },
+  { type: "error", name: "AlreadyClaimed", inputs: [] },
+  { type: "error", name: "NotYours", inputs: [] },
+  { type: "error", name: "Unavailable", inputs: [{ name: "code", type: "uint8" }] },
   {
     type: "event",
     name: "Subscribed",
     inputs: [
-      { name: "positionId", type: "uint256", indexed: true },
-      { name: "user", type: "address", indexed: true },
-      { name: "productId", type: "bytes32", indexed: true },
-      { name: "amount", type: "uint256", indexed: false },
-      { name: "premiumBps", type: "uint256", indexed: false },
-    ],
-  },
-  {
-    type: "event",
-    name: "Settled",
-    inputs: [
-      { name: "productId", type: "bytes32", indexed: true },
-      { name: "settlePrice", type: "int256", indexed: false },
-      { name: "converted", type: "bool", indexed: false },
+      { name: "id", type: "uint256", indexed: true },
+      { name: "owner", type: "address", indexed: true },
+      { name: "direction", type: "uint8", indexed: false },
+      { name: "deposit", type: "uint256", indexed: false },
+      { name: "strikeWad", type: "uint256", indexed: false },
+      { name: "premiumBps", type: "uint16", indexed: false },
+      { name: "expiry", type: "uint64", indexed: false },
     ],
   },
   {
     type: "event",
     name: "Claimed",
     inputs: [
-      { name: "positionId", type: "uint256", indexed: true },
-      { name: "token", type: "address", indexed: false },
+      { name: "id", type: "uint256", indexed: true },
+      { name: "owner", type: "address", indexed: true },
+      { name: "asset", type: "address", indexed: false },
       { name: "amount", type: "uint256", indexed: false },
+      { name: "converted", type: "bool", indexed: false },
     ],
   },
 ] as const;
@@ -178,7 +319,8 @@ export const erc20Abi = [
     inputs: [],
     outputs: [{ name: "", type: "string" }],
   },
-  // ERC-8056: stock amounts are displayed through this multiplier.
+  // ERC-8056: how many shares one token stands for. A label on the screen only;
+  // the feed already prices the token, so it never enters an amount.
   {
     type: "function",
     name: "uiMultiplier",
