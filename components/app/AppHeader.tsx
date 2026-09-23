@@ -13,6 +13,7 @@ import { useWallet } from "./AppProviders";
 const NAV = [
   { label: "Products", href: "/app" },
   { label: "Positions", href: "/app/positions" },
+  { label: "Pool", href: "/app/pool" },
 ];
 
 // Brief 8: the app header. Lockup back to the site, two sections, the wallet on
