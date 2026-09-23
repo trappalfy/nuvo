@@ -681,6 +681,55 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
         }
     }
 
+    // --- роли и настройки ---
+
+    /// @notice Останавливает только подписки и вклады. Расчёт, выплата и вывод
+    ///         вкладчика не останавливаются ничем: иначе пауза заперла бы чужие деньги.
+    function pause() external {
+        if (msg.sender != owner() && msg.sender != guardian) revert NotAllowed();
+        paused = true;
+        emit PausedSet(true, msg.sender);
+    }
+
+    function unpause() external onlyOwner {
+        paused = false;
+        emit PausedSet(false, msg.sender);
+    }
+
+    function setGuardian(address who) external onlyOwner {
+        guardian = who;
+        emit GuardianSet(who);
+    }
+
+    /// @notice Новая сетка премий назначается заранее и вступает в силу через MODEL_DELAY.
+    function scheduleModel(address model) external onlyOwner {
+        if (model == address(0)) revert NotAllowed();
+        pendingModel = IPremiumModel(model);
+        pendingModelEta = block.timestamp + MODEL_DELAY;
+        emit ModelScheduled(model, pendingModelEta);
+    }
+
+    /// @notice Открыто всем: после задержки применить назначенную модель.
+    function applyModel() external {
+        if (address(pendingModel) == address(0)) revert NothingPending();
+        if (block.timestamp < pendingModelEta) revert TooEarly();
+        premiumModel = pendingModel;
+        pendingModel = IPremiumModel(address(0));
+        pendingModelEta = 0;
+        emit ModelSet(address(premiumModel));
+    }
+
+    function setLimits(
+        uint64 priceAge,
+        uint64 priceAgeSettle,
+        uint256 minDeposit,
+        uint256 maxPosition,
+        uint256 maxExpiryLock,
+        uint16 lockedShareBps
+    ) external onlyOwner {
+        _setLimits(priceAge, priceAgeSettle, minDeposit, maxPosition, maxExpiryLock, lockedShareBps);
+    }
+
     /// @dev Учёт ведётся по счётчикам, поэтому токен, удерживающий комиссию с
     ///      перевода, разошёлся бы с ними. Такой перевод отклоняется.
     function _pullExactly(IERC20 asset, uint256 amount) internal {
