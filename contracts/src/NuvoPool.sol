@@ -35,6 +35,20 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
     /// @notice Доля, которая остаётся в пуле навсегда: не даёт обнулить масштаб пая.
     uint256 internal constant FLOOR_SHARES = 1e15;
 
+    uint8 public constant CODE_OK = 0;
+    uint8 public constant CODE_PAUSED = 1;
+    uint8 public constant CODE_NO_EXPIRY = 2;
+    uint8 public constant CODE_BAD_PRICE = 3;
+    uint8 public constant CODE_STALE_PRICE = 4;
+    uint8 public constant CODE_NO_PREMIUM = 5;
+    uint8 public constant CODE_ZERO_AMOUNT = 6;
+    uint8 public constant CODE_BELOW_MIN = 7;
+    uint8 public constant CODE_ABOVE_MAX = 8;
+    uint8 public constant CODE_EXPIRY_FULL = 9;
+    uint8 public constant CODE_NO_INVENTORY = 10;
+    uint8 public constant CODE_TOO_MUCH_LOCKED = 11;
+    uint8 public constant CODE_BAD_DISTANCE = 12;
+
     struct Params {
         address usdg;
         address token;
@@ -294,6 +308,203 @@ contract NuvoPool is Ownable2Step, ReentrancyGuard {
         if (usdgOut > 0) usdg.safeTransfer(msg.sender, usdgOut);
         if (tokenOut > 0) token.safeTransfer(msg.sender, tokenOut);
         emit LiquidityRemoved(msg.sender, usdgOut, tokenOut, shares);
+    }
+
+    // --- условия подписки ---
+
+    /// @notice Всё, что нужно экрану подписки, одним вызовом. Не откатывается:
+    ///         причина отказа приходит числом в code.
+    function preview(uint8 direction, uint16 distanceBps, uint256 amount)
+        external
+        view
+        returns (Preview memory)
+    {
+        return _quote(direction, distanceBps, amount);
+    }
+
+    function subscribe(
+        uint8 direction,
+        uint16 distanceBps,
+        uint256 amount,
+        uint256 limitStrikeWad,
+        uint64 deadline
+    ) external nonReentrant returns (uint256 id) {
+        if (block.timestamp > deadline) revert Expired();
+
+        Preview memory p = _quote(direction, distanceBps, amount);
+        if (p.code != CODE_OK) revert Unavailable(p.code);
+        // Страйк считается от живой цены. Подписчик задаёт границу, за которую
+        // цена не должна была уехать между просмотром и транзакцией.
+        if (direction == BUY_LOW ? p.strikeWad > limitStrikeWad : p.strikeWad < limitStrikeWad) {
+            revert StrikeMoved();
+        }
+
+        freeUsdg -= p.lockUsdg;
+        lockedUsdg += p.lockUsdg;
+        freeToken -= p.lockToken;
+        lockedToken += p.lockToken;
+        lockedValueAt[p.expiry] += _value(p.lockUsdg, p.lockToken, p.priceWad);
+
+        id = _positions.length;
+        _positions.push(
+            Position({
+                owner: msg.sender,
+                direction: direction,
+                premiumBps: p.premiumBps,
+                expiry: p.expiry,
+                claimed: false,
+                deposit: amount,
+                strikeWad: p.strikeWad,
+                lockUsdg: p.lockUsdg,
+                lockToken: p.lockToken
+            })
+        );
+        _byOwner[msg.sender].push(id);
+
+        if (direction == BUY_LOW) {
+            _pullExactly(usdg, amount);
+            depositsUsdg += amount;
+        } else {
+            _pullExactly(token, amount);
+            depositsToken += amount;
+        }
+
+        emit Subscribed(id, msg.sender, direction, amount, p.strikeWad, p.premiumBps, p.expiry);
+    }
+
+    function position(uint256 id) external view returns (Position memory) {
+        return _positions[id];
+    }
+
+    function positionsOf(address who) external view returns (uint256[] memory) {
+        return _byOwner[who];
+    }
+
+    function positionCount() external view returns (uint256) {
+        return _positions.length;
+    }
+
+    // --- внутренняя кухня расчёта условий ---
+
+    function _quote(uint8 direction, uint16 distanceBps, uint256 amount)
+        internal
+        view
+        returns (Preview memory p)
+    {
+        if (direction > SELL_HIGH || distanceBps == 0 || distanceBps >= BPS) {
+            p.code = CODE_BAD_DISTANCE;
+            return p;
+        }
+
+        p.expiry = factory.nextExpiry(MIN_LEAD);
+
+        (bool ok, uint256 price, uint256 at) = _tryPrice();
+        p.priceWad = price;
+        p.priceUpdatedAt = at;
+
+        if (ok) {
+            p.strikeWad = _strike(direction, distanceBps, price);
+            p.premiumBps = _modelBps(direction, distanceBps);
+            if (p.premiumBps > 0 && p.strikeWad > 0) {
+                p.ifConverted = _converted(direction, amount, p.strikeWad, p.premiumBps);
+                p.ifNot = _kept(amount, p.premiumBps);
+                (p.lockUsdg, p.lockToken) = _locks(direction, amount, p.strikeWad, p.premiumBps);
+            }
+        }
+
+        p.code = _code(direction, amount, p, ok);
+    }
+
+    function _code(uint8 direction, uint256 amount, Preview memory p, bool priceOk)
+        internal
+        view
+        returns (uint8)
+    {
+        if (paused) return CODE_PAUSED;
+        if (p.expiry == 0) return CODE_NO_EXPIRY;
+        if (!priceOk || p.strikeWad == 0) return CODE_BAD_PRICE;
+        if (block.timestamp > p.priceUpdatedAt + maxPriceAge) return CODE_STALE_PRICE;
+        if (p.premiumBps == 0 || p.premiumBps > maxPremiumBps) return CODE_NO_PREMIUM;
+        if (amount == 0) return CODE_ZERO_AMOUNT;
+
+        uint256 depositValue = direction == BUY_LOW
+            ? Units.toWad(amount, usdgDecimals)
+            : (Units.toWad(amount, tokenDecimals) * p.priceWad) / WAD;
+        if (depositValue < minDepositValueWad) return CODE_BELOW_MIN;
+        if (maxPositionValueWad != 0 && depositValue > maxPositionValueWad) return CODE_ABOVE_MAX;
+
+        if (maxExpiryLockValueWad != 0) {
+            uint256 lockValue = _value(p.lockUsdg, p.lockToken, p.priceWad);
+            if (lockedValueAt[p.expiry] + lockValue > maxExpiryLockValueWad) return CODE_EXPIRY_FULL;
+        }
+        if (p.lockUsdg > freeUsdg || p.lockToken > freeToken) return CODE_NO_INVENTORY;
+        if (maxLockedShareBps != 0) {
+            uint256 total = _value(freeUsdg + lockedUsdg, freeToken + lockedToken, p.priceWad);
+            uint256 after_ = _value(lockedUsdg + p.lockUsdg, lockedToken + p.lockToken, p.priceWad);
+            if (after_ * BPS > total * maxLockedShareBps) return CODE_TOO_MUCH_LOCKED;
+        }
+        return CODE_OK;
+    }
+
+    /// @dev Чтение без отката: preview должен отвечать и при мёртвом фиде.
+    function _tryPrice() internal view returns (bool ok, uint256 price, uint256 at) {
+        try feed.latestRoundData() returns (uint80, int256 answer, uint256, uint256 updatedAt, uint80) {
+            if (answer > 0 && updatedAt > 0) {
+                return (true, uint256(answer) * (10 ** (18 - feedDecimals)), updatedAt);
+            }
+        } catch {}
+        return (false, 0, 0);
+    }
+
+    function _modelBps(uint8 direction, uint16 distanceBps) internal view returns (uint16) {
+        try premiumModel.premiumBps(direction, distanceBps) returns (uint16 b) {
+            return b;
+        } catch {
+            return 0;
+        }
+    }
+
+    function _strike(uint8 direction, uint16 distanceBps, uint256 price) internal pure returns (uint256) {
+        return direction == BUY_LOW
+            ? (price * (BPS - distanceBps)) / BPS
+            : (price * (BPS + distanceBps)) / BPS;
+    }
+
+    /// @notice Выплата, если цена дошла до страйка, в базовых единицах другого актива.
+    function _converted(uint8 direction, uint256 amount, uint256 strikeWad, uint16 bps)
+        internal
+        view
+        returns (uint256)
+    {
+        if (direction == BUY_LOW) {
+            // D x (1 + r) / K
+            uint256 grossWad = (Units.toWad(amount, usdgDecimals) * (BPS + bps)) / BPS;
+            return Units.fromWad((grossWad * WAD) / strikeWad, tokenDecimals);
+        }
+        // Q x K x (1 + r)
+        uint256 qWad = (Units.toWad(amount, tokenDecimals) * (BPS + bps)) / BPS;
+        return Units.fromWad((qWad * strikeWad) / WAD, usdgDecimals);
+    }
+
+    /// @notice Выплата, если не дошла: депозит плюс премия, в активе депозита.
+    function _kept(uint256 amount, uint16 bps) internal pure returns (uint256) {
+        return amount + (amount * bps) / BPS;
+    }
+
+    /// @dev Замок под конверсию — во встречном активе, замок под отказ — премия
+    ///      в активе депозита. Оба берутся из свободного инвентаря вкладчиков.
+    function _locks(uint8 direction, uint256 amount, uint256 strikeWad, uint16 bps)
+        internal
+        view
+        returns (uint256 lockUsdgOut, uint256 lockTokenOut)
+    {
+        if (direction == BUY_LOW) {
+            lockTokenOut = _converted(direction, amount, strikeWad, bps);
+            lockUsdgOut = (amount * bps) / BPS;
+        } else {
+            lockUsdgOut = _converted(direction, amount, strikeWad, bps);
+            lockTokenOut = (amount * bps) / BPS;
+        }
     }
 
     /// @dev Учёт ведётся по счётчикам, поэтому токен, удерживающий комиссию с
