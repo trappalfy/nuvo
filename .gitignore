@@ -10,3 +10,6 @@ next-env.d.ts
 shots/
 reference/
 background-nuvo.mp4
+
+# Local rehearsal runs. Real deployments keep their record.
+contracts/broadcast/*/31337/

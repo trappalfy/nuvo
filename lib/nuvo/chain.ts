@@ -623,8 +623,11 @@ export class ChainClient implements NuvoClient {
         abi: nuvoPoolAbi,
         functionName: "maxPriceAgeSettle",
       }),
+      // The chain's clock, not the browser's: the pool decides by block.timestamp,
+      // and a visitor whose computer is off by a day would be told the wrong thing.
+      client.getBlock(),
     ])
-      .then(([[, updatedAt], maxAge]) => BigInt(Math.floor(Date.now() / 1000)) <= updatedAt + maxAge)
+      .then(([[, updatedAt], maxAge, block]) => block.timestamp <= updatedAt + maxAge)
       .catch(() => false);
 
     return {

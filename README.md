@@ -37,31 +37,43 @@ and from the pools.
 
     cd contracts && forge test        # the whole suite; the fork run skips without RPC_URL
     node script/expiries.mjs 26       # the expiry calendar for addExpiries
+    bash script/rehearse.sh           # a whole week on a throwaway local chain
+
+### Rehearsing the deployment
+
+`script/rehearse.sh` runs the real `script/Deploy.s.sol`, with the same env the
+live run will use, against a throwaway anvil with a mock USDG, a mock stock and
+a mock feed. It then plays a whole week: seed the inventory, subscribe, close
+the week, settle, claim. Run it after any change to the contracts or the deploy
+script, and before touching a live network.
 
 ### Settling a week
 
 `settle(expiry)` is open to anyone and is the normal path: from Friday's close
-until the feed moves again on Monday it takes the price that was in effect at the
-bell. Run it shortly after the close.
+until the feed moves again on Monday it takes the price that was in effect at
+the bell. `script/settle.mjs` does this for every pool the factory knows:
 
-If it is missed and the feed has already moved on, `settle` refuses — the latest
-round is no longer the one that was in effect. Recover with the round that was:
+    RPC_URL=… FACTORY_ADDRESS=0x… node script/settle.mjs --dry-run
+    RPC_URL=… FACTORY_ADDRESS=0x… PRIVATE_KEY=0x… node script/settle.mjs
+
+It exits 1 when a week is still waiting, so a scheduler can alarm on it. The
+key it signs with needs nothing but gas — settling is permissionless and pays
+no one. Run it shortly after Friday's close.
+
+If the feed has already moved on, `settle` refuses: the latest round is no
+longer the one that was in effect. The bot then falls back to
+`findSettleRound` + `settleWithRound` on its own. By hand that is:
 
     cast call $POOL "findSettleRound(uint64,uint80,uint16)(uint80,bool)" $EXPIRY $LATEST_ROUND 64
     cast send $POOL "settleWithRound(uint64,uint80)" $EXPIRY $ROUND
 
 Until a week is settled its positions cannot be claimed, so do not leave it. A
 position still unclaimed a day after its expiry can be closed by anyone with
-`resolve(id)`: the payout is recorded as a debt the owner withdraws later, and
-the depositors' inventory goes back to work. Deposits and withdrawals to the pool
-are closed while a settled week is still unclaimed — that is what keeps a
-latecomer from buying into an outcome that is already decided.
-
-The launch order, the roles and the limits are in
-`docs/superpowers/specs/2026-09-23-nuvo-protocol-design.md`. The interface the UI
-calls is in `lib/nuvo/abi.ts`. Prices are 8-decimal fixed point from Chainlink,
-strikes are 18-decimal, and the feed prices the token itself — the ERC-8056
-multiplier is a label, never part of an amount.
+`resolve(id)`: the payout is recorded as a debt the owner withdraws later —
+the Positions screen shows it and calls `withdrawOwed` — and the depositors'
+inventory goes back to work. Deposits and withdrawals to the pool are closed
+while a settled week is still unclaimed; that is what keeps a latecomer from
+buying into an outcome that is already decided.
 
 ### Schedule
 
